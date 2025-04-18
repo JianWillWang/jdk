@@ -1,6 +1,6 @@
 /*
- * Copyright (c) 2000, 2022, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012, 2022 SAP SE. All rights reserved.
+ * Copyright (c) 2000, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2025 SAP SE. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,6 +27,7 @@
 #define CPU_PPC_REGISTER_PPC_HPP
 
 #include "asm/register.hpp"
+#include "utilities/count_trailing_zeros.hpp"
 
 // forward declaration
 class VMRegImpl;
@@ -92,14 +93,14 @@ class Register {
   inline constexpr friend Register as_Register(int encoding);
 
   // accessors
-  int encoding() const { assert(is_valid(), "invalid register"); return _encoding; }
+  constexpr int encoding() const { assert(is_valid(), "invalid register"); return _encoding; }
   inline VMReg as_VMReg() const;
   Register successor() const { return Register(encoding() + 1); }
 
   // testers
-  bool is_valid()       const { return ( 0 <= _encoding && _encoding <  number_of_registers); }
-  bool is_volatile()    const { return ( 0 <= _encoding && _encoding <= 13 ); }
-  bool is_nonvolatile() const { return (14 <= _encoding && _encoding <= 31 ); }
+  constexpr bool is_valid()       const { return ( 0 <= _encoding && _encoding <  number_of_registers); }
+  constexpr bool is_volatile()    const { return ( 0 <= _encoding && _encoding <= 13 ); }
+  constexpr bool is_nonvolatile() const { return (14 <= _encoding && _encoding <= 31 ); }
 
   const char* name() const;
 };
@@ -163,12 +164,12 @@ class ConditionRegister {
   inline constexpr friend ConditionRegister as_ConditionRegister(int encoding);
 
   // accessors
-  int encoding() const { assert(is_valid(), "invalid register"); return _encoding; }
+  constexpr int encoding() const { assert(is_valid(), "invalid register"); return _encoding; }
   inline VMReg as_VMReg() const;
 
   // testers
-  bool is_valid()       const { return (0 <= _encoding && _encoding <  number_of_registers); }
-  bool is_nonvolatile() const { return (2 <= _encoding && _encoding <= 4 );  }
+  constexpr bool is_valid()       const { return (0 <= _encoding && _encoding <  number_of_registers); }
+  constexpr bool is_nonvolatile() const { return (2 <= _encoding && _encoding <= 4 );  }
 
   const char* name() const;
 };
@@ -178,14 +179,14 @@ inline constexpr ConditionRegister as_ConditionRegister(int encoding) {
   return ConditionRegister(encoding);
 }
 
-constexpr ConditionRegister CCR0 = as_ConditionRegister(0);
-constexpr ConditionRegister CCR1 = as_ConditionRegister(1);
-constexpr ConditionRegister CCR2 = as_ConditionRegister(2);
-constexpr ConditionRegister CCR3 = as_ConditionRegister(3);
-constexpr ConditionRegister CCR4 = as_ConditionRegister(4);
-constexpr ConditionRegister CCR5 = as_ConditionRegister(5);
-constexpr ConditionRegister CCR6 = as_ConditionRegister(6);
-constexpr ConditionRegister CCR7 = as_ConditionRegister(7);
+constexpr ConditionRegister CR0 = as_ConditionRegister(0);
+constexpr ConditionRegister CR1 = as_ConditionRegister(1);
+constexpr ConditionRegister CR2 = as_ConditionRegister(2);
+constexpr ConditionRegister CR3 = as_ConditionRegister(3);
+constexpr ConditionRegister CR4 = as_ConditionRegister(4);
+constexpr ConditionRegister CR5 = as_ConditionRegister(5);
+constexpr ConditionRegister CR6 = as_ConditionRegister(6);
+constexpr ConditionRegister CR7 = as_ConditionRegister(7);
 
 
 class VectorSRegister;
@@ -207,12 +208,12 @@ class FloatRegister {
   inline constexpr friend FloatRegister as_FloatRegister(int encoding);
 
   // accessors
-  int encoding() const { assert(is_valid(), "invalid register"); return _encoding; }
+  constexpr int encoding() const { assert(is_valid(), "invalid register"); return _encoding; }
   inline VMReg as_VMReg() const;
   FloatRegister successor() const { return FloatRegister(encoding() + 1); }
 
   // testers
-  bool is_valid() const { return (0 <= _encoding && _encoding < number_of_registers); }
+  constexpr bool is_valid() const { return (0 <= _encoding && _encoding < number_of_registers); }
 
   const char* name() const;
 
@@ -279,11 +280,11 @@ class SpecialRegister {
   inline constexpr friend SpecialRegister as_SpecialRegister(int encoding);
 
   // accessors
-  int encoding() const { assert(is_valid(), "invalid register"); return _encoding; }
+  constexpr int encoding() const { assert(is_valid(), "invalid register"); return _encoding; }
   inline VMReg as_VMReg() const;
 
   // testers
-  bool is_valid() const { return (0 <= _encoding && _encoding < number_of_registers); }
+  constexpr bool is_valid() const { return (0 <= _encoding && _encoding < number_of_registers); }
 
   const char* name() const;
 };
@@ -318,10 +319,10 @@ class VectorRegister {
   inline constexpr friend VectorRegister as_VectorRegister(int encoding);
 
   // accessors
-  int encoding()  const { assert(is_valid(), "invalid register"); return _encoding; }
+  constexpr int encoding() const { assert(is_valid(), "invalid register"); return _encoding; }
 
   // testers
-  bool is_valid() const { return (0 <= _encoding && _encoding < number_of_registers); }
+  constexpr bool is_valid() const { return (0 <= _encoding && _encoding < number_of_registers); }
 
   const char* name() const;
 
@@ -387,11 +388,11 @@ class VectorSRegister {
   inline constexpr friend VectorSRegister as_VectorSRegister(int encoding);
 
   // accessors
-  int encoding() const { assert(is_valid(), "invalid register"); return _encoding; }
+  constexpr int encoding() const { assert(is_valid(), "invalid register"); return _encoding; }
   inline VMReg as_VMReg() const;
 
   // testers
-  bool is_valid() const { return (0 <= _encoding && _encoding < number_of_registers); }
+  constexpr bool is_valid() const { return (0 <= _encoding && _encoding < number_of_registers); }
 
   const char* name() const;
 
@@ -554,5 +555,13 @@ constexpr Register R29_TOC = R29;
 // Scratch registers are volatile.
 constexpr Register R11_scratch1 = R11;
 constexpr Register R12_scratch2 = R12;
+
+template <>
+inline Register AbstractRegSet<Register>::first() {
+  if (_bitset == 0) { return noreg; }
+  return as_Register(count_trailing_zeros(_bitset));
+}
+
+typedef AbstractRegSet<Register> RegSet;
 
 #endif // CPU_PPC_REGISTER_PPC_HPP

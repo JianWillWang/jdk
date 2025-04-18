@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -47,7 +47,6 @@ class PhaseChaitin;
 //------------------------------LRG--------------------------------------------
 // Live-RanGe structure.
 class LRG : public ResourceObj {
-  friend class VMStructs;
 public:
   static const uint AllStack_size = 0xFFFFF; // This mask size is used to tell that the mask of this LRG supports stack positions
   enum { SPILL_REG=29999 };     // Register number of a spilled LRG
@@ -163,8 +162,8 @@ public:
   bool is_scalable() {
 #ifdef ASSERT
     if (_is_scalable) {
-      assert(_is_vector && (_num_regs == RegMask::SlotsPerVecA) ||
-             _is_predicate && (_num_regs == RegMask::SlotsPerRegVectMask), "unexpected scalable reg");
+      assert((_is_vector && (_num_regs == RegMask::SlotsPerVecA)) ||
+             (_is_predicate && (_num_regs == RegMask::SlotsPerRegVectMask)), "unexpected scalable reg");
     }
 #endif
     return Matcher::implements_scalable_vector && _is_scalable;
@@ -217,7 +216,7 @@ public:
 
 
   // Alive if non-zero, dead if zero
-  bool alive() const { return _def != NULL; }
+  bool alive() const { return _def != nullptr; }
   bool is_multidef() const { return _def == NodeSentinel; }
   bool is_singledef() const { return _def != NodeSentinel; }
 
@@ -236,7 +235,6 @@ public:
 // abstract!  It needs abstraction so I can fiddle with the implementation to
 // get even more speed.
 class PhaseIFG : public Phase {
-  friend class VMStructs;
   // Current implementation: a triangular adjacency list.
 
   // Array of adjacency-lists, indexed by live-range number
@@ -292,7 +290,7 @@ public:
 #endif
 
   //--------------- Live Range Accessors
-  LRG &lrgs(uint idx) const { assert(idx < _maxlrg, "oob"); return _lrgs[idx]; }
+  LRG &lrgs(uint idx) const { assert(idx < _maxlrg, "oob: index %u not smaller than %u", idx, _maxlrg); return _lrgs[idx]; }
 
   // Compute and set effective degree.  Might be folded into SquareUp().
   void Compute_Effective_Degree();
@@ -417,7 +415,6 @@ public:
 //------------------------------Chaitin----------------------------------------
 // Briggs-Chaitin style allocation, mostly.
 class PhaseChaitin : public PhaseRegAlloc {
-  friend class VMStructs;
 
   int _trip_cnt;
   int _alternate;
@@ -747,7 +744,7 @@ private:
     Node* _def;
     Node* _first_use;
   public:
-    RegDefUse() : _def(NULL), _first_use(NULL) { }
+    RegDefUse() : _def(nullptr), _first_use(nullptr) { }
     Node* def() const       { return _def;       }
     Node* first_use() const { return _first_use; }
 
@@ -758,8 +755,8 @@ private:
       }
     }
     void clear() {
-      _def = NULL;
-      _first_use = NULL;
+      _def = nullptr;
+      _first_use = nullptr;
     }
   };
   typedef GrowableArray<RegDefUse> RegToDefUseMap;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2023, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2012, 2015 SAP SE. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -38,12 +38,6 @@ enum {
 };
 
 
-// Explicit rounding operations are not required to implement the strictFP mode.
-enum {
-  pd_strict_fp_requires_explicit_rounding = false
-};
-
-
 // registers
 enum {
   pd_nof_cpu_regs_frame_map = 32,              // Number of registers used during code emission.
@@ -75,6 +69,11 @@ enum {
 
 enum {
   pd_two_operand_lir_form = false
+};
+
+// the number of stack required by ArrayCopyStub
+enum {
+  pd_arraycopystub_reserved_argument_area_size = 2
 };
 
 #endif // CPU_PPC_C1_DEFS_PPC_HPP

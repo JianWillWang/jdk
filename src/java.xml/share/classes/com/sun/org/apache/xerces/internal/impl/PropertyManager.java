@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,8 +24,6 @@
  */
 package com.sun.org.apache.xerces.internal.impl;
 
-import com.sun.org.apache.xerces.internal.utils.XMLSecurityManager;
-import com.sun.org.apache.xerces.internal.utils.XMLSecurityPropertyManager;
 import com.sun.xml.internal.stream.StaxEntityResolverWrapper;
 import java.util.HashMap;
 import javax.xml.XMLConstants;
@@ -33,9 +31,12 @@ import javax.xml.catalog.CatalogFeatures;
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLOutputFactory;
 import javax.xml.stream.XMLResolver;
+import jdk.xml.internal.FeaturePropertyBase;
 import jdk.xml.internal.JdkConstants;
 import jdk.xml.internal.JdkProperty;
 import jdk.xml.internal.JdkXmlUtils;
+import jdk.xml.internal.XMLSecurityManager;
+import jdk.xml.internal.XMLSecurityPropertyManager;
 
 /**
  * This class manages the properties for the Stax specification and its
@@ -45,6 +46,8 @@ import jdk.xml.internal.JdkXmlUtils;
  * @author Neeraj Bajaj
  * @author K Venugopal
  * @author Sunitha Reddy
+ *
+ * @LastModified: Apr 2025
  */
 public class PropertyManager {
 
@@ -148,10 +151,7 @@ public class PropertyManager {
 
         // Initialize Catalog features
         supportedProps.put(XMLConstants.USE_CATALOG, JdkXmlUtils.USE_CATALOG_DEFAULT);
-        for (CatalogFeatures.Feature f : CatalogFeatures.Feature.values()) {
-            supportedProps.put(f.getPropertyName(), null);
-        }
-
+        JdkXmlUtils.initCatalogFeatures(supportedProps);
         supportedProps.put(JdkConstants.CDATA_CHUNK_SIZE, JdkConstants.CDATA_CHUNK_SIZE_DEFAULT);
     }
 
@@ -185,6 +185,9 @@ public class PropertyManager {
      * @return the value of a property
      */
     public Object getProperty(String property) {
+        if (XMLInputFactory.SUPPORT_DTD.equals(property)) {
+            return fSecurityManager.is(XMLSecurityManager.Limit.STAX_SUPPORT_DTD);
+        }
         /**
          * Check to see if the property is managed by the security manager *
          */
@@ -252,7 +255,7 @@ public class PropertyManager {
                 || !fSecurityManager.setLimit(property, JdkProperty.State.APIPROPERTY, value)) {
             //check if the property is managed by security property manager
             if (fSecurityPropertyMgr == null
-                    || !fSecurityPropertyMgr.setValue(property, XMLSecurityPropertyManager.State.APIPROPERTY, value)) {
+                    || !fSecurityPropertyMgr.setValue(property, FeaturePropertyBase.State.APIPROPERTY, value)) {
                 //fall back to the existing property manager
                 supportedProps.put(property, value);
             }

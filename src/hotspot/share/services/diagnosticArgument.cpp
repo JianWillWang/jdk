@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -22,7 +22,6 @@
  *
  */
 
-#include "precompiled.hpp"
 #include "jvm.h"
 #include "memory/allocation.inline.hpp"
 #include "memory/resourceArea.hpp"
@@ -115,12 +114,13 @@ template <> void DCmdArgument<jlong>::parse_value(const char* str,
       || sscanf(str, JLONG_FORMAT "%n", &_value, &scanned) != 1
       || (size_t)scanned != len)
   {
-    const int maxprint = 64;
     Exceptions::fthrow(THREAD_AND_LOCATION, vmSymbols::java_lang_IllegalArgumentException(),
-      "Integer parsing error in command argument '%s'. Could not parse: %.*s%s.\n", _name,
-      MIN2((int)len, maxprint),
-      (str == nullptr ? "<null>" : str),
-      (len > maxprint ? "..." : ""));
+                       "Integer parsing error in command argument '%.*s'. Could not parse: %.*s%s.\n",
+                       maxprint,
+                       _name,
+                       maxprint > len ? (int)len : maxprint,
+                       (str == nullptr ? "<null>" : str),
+                       (len > maxprint ? "..." : ""));
   }
 }
 
@@ -160,7 +160,11 @@ PRAGMA_DIAG_POP
 
       buf[len] = '\0';
       Exceptions::fthrow(THREAD_AND_LOCATION, vmSymbols::java_lang_IllegalArgumentException(),
-        "Boolean parsing error in command argument '%s'. Could not parse: %s.\n", _name, buf);
+                         "Boolean parsing error in command argument '%.*s'. Could not parse: %.*s.\n",
+                         maxprint,
+                         _name,
+                         maxprint,
+                         buf);
     }
   }
 }
@@ -178,31 +182,37 @@ template <> void DCmdArgument<bool>::init_value(TRAPS) {
 
 template <> void DCmdArgument<bool>::destroy_value() { }
 
+template <> void DCmdArgument<char*>::destroy_value() {
+  FREE_C_HEAP_ARRAY(char, _value);
+  set_value(nullptr);
+}
+
 template <> void DCmdArgument<char*>::parse_value(const char* str,
                                                   size_t len, TRAPS) {
   if (str == nullptr) {
-    _value = nullptr;
+    destroy_value();
   } else {
-    _value = NEW_C_HEAP_ARRAY(char, len + 1, mtInternal);
-    int n = os::snprintf(_value, len + 1, "%.*s", (int)len, str);
-    assert((size_t)n <= len, "Unexpected number of characters in string");
+    // Use realloc as we may have a default set.
+    if (strcmp(type(), "FILE") == 0) {
+      _value = REALLOC_C_HEAP_ARRAY(char, _value, JVM_MAXPATHLEN, mtInternal);
+      if (!Arguments::copy_expand_pid(str, len, _value, JVM_MAXPATHLEN)) {
+        stringStream error_msg;
+        error_msg.print("File path invalid or too long: %s", str);
+        THROW_MSG(vmSymbols::java_lang_IllegalArgumentException(), error_msg.base());
+      }
+    } else {
+      _value = REALLOC_C_HEAP_ARRAY(char, _value, len + 1, mtInternal);
+      int n = os::snprintf(_value, len + 1, "%.*s", (int)len, str);
+      assert((size_t)n <= len, "Unexpected number of characters in string");
+    }
   }
 }
 
 template <> void DCmdArgument<char*>::init_value(TRAPS) {
-  if (has_default() && _default_string != nullptr) {
+  set_value(nullptr); // Must be initialized before calling parse_value
+  if (has_default()) {
     this->parse_value(_default_string, strlen(_default_string), THREAD);
-    if (HAS_PENDING_EXCEPTION) {
-     fatal("Default string must be parsable");
-    }
-  } else {
-    set_value(nullptr);
   }
-}
-
-template <> void DCmdArgument<char*>::destroy_value() {
-  FREE_C_HEAP_ARRAY(char, _value);
-  set_value(nullptr);
 }
 
 template <> void DCmdArgument<NanoTimeArgument>::parse_value(const char* str,

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,8 +29,6 @@ import jdk.internal.access.SharedSecrets;
 import jdk.internal.util.StaticProperty;
 
 import java.lang.reflect.InvocationTargetException;
-import java.security.AccessController;
-import java.security.PrivilegedAction;
 import java.security.Security;
 import java.util.ArrayList;
 import java.util.List;
@@ -187,8 +185,11 @@ import static java.lang.System.Logger.Level.ERROR;
  *
  * This class shows how an application provided filter factory can combine filters
  * to check every deserialization operation that takes place in a thread.
- * It defines a thread-local variable to hold the thread-specific filter, and constructs a filter factory
- * that composes that filter with the static JVM-wide filter and the stream-specific filter.
+ * It defines a thread-local variable to hold the thread-specific filter, and construct a filter factory
+ * that composes that filter with the static JVM-wide filter and the stream-specific filter,
+ * rejecting any classes not handled by those two filters.
+ * If a stream specific filter is set and does not accept or reject a class,
+ * the combined JVM-wide filter and thread filter is applied.
  * The {@code doWithSerialFilter} method does the setup of the thread-specific filter
  * and invokes the application provided {@link Runnable Runnable}.
  *
@@ -207,26 +208,18 @@ import static java.lang.System.Logger.Level.ERROR;
  *             // Called from the OIS constructor or perhaps OIS.setObjectInputFilter with no current filter
  *             var filter = filterThreadLocal.get();
  *             if (filter != null) {
- *                 // Wrap the filter to reject UNDECIDED results
- *                 filter = ObjectInputFilter.rejectUndecidedClass(filter);
+ *                 // Merge to invoke the thread local filter and then the JVM-wide filter (if any)
+ *                 filter = ObjectInputFilter.merge(filter, next);
+ *                 return ObjectInputFilter.rejectUndecidedClass(filter);
  *             }
- *             if (next != null) {
- *                 // Merge the next filter with the thread filter, if any
- *                 // Initially this is the static JVM-wide filter passed from the OIS constructor
- *                 // Wrap the filter to reject UNDECIDED results
- *                 filter = ObjectInputFilter.merge(next, filter);
- *                 filter = ObjectInputFilter.rejectUndecidedClass(filter);
- *             }
- *             return filter;
+ *             return (next == null) ? null : ObjectInputFilter.rejectUndecidedClass(next);
  *         } else {
  *             // Called from OIS.setObjectInputFilter with a current filter and a stream-specific filter.
  *             // The curr filter already incorporates the thread filter and static JVM-wide filter
  *             // and rejection of undecided classes
- *             // If there is a stream-specific filter wrap it and a filter to recheck for undecided
+ *             // If there is a stream-specific filter merge to invoke it and then the current filter.
  *             if (next != null) {
- *                 next = ObjectInputFilter.merge(next, curr);
- *                 next = ObjectInputFilter.rejectUndecidedClass(next);
- *                 return next;
+ *                 return ObjectInputFilter.merge(next, curr);
  *             }
  *             return curr;
  *         }
@@ -635,17 +628,13 @@ public interface ObjectInputFilter {
             configLog = System.getLogger("java.io.serialization");
 
             // Get the values of the system properties, if they are defined
-            @SuppressWarnings("removal")
             String factoryClassName = StaticProperty.jdkSerialFilterFactory() != null
                     ? StaticProperty.jdkSerialFilterFactory()
-                    : AccessController.doPrivileged((PrivilegedAction<String>) () ->
-                        Security.getProperty(SERIAL_FILTER_FACTORY_PROPNAME));
+                    : Security.getProperty(SERIAL_FILTER_FACTORY_PROPNAME);
 
-            @SuppressWarnings("removal")
             String filterString = StaticProperty.jdkSerialFilter() != null
                     ? StaticProperty.jdkSerialFilter()
-                    : AccessController.doPrivileged((PrivilegedAction<String>) () ->
-                        Security.getProperty(SERIAL_FILTER_PROPNAME));
+                    : Security.getProperty(SERIAL_FILTER_PROPNAME);
 
             // Initialize the static filter if the jdk.serialFilter is present
             String filterMessage = null;
@@ -733,19 +722,12 @@ public interface ObjectInputFilter {
          * Set the static JVM-wide filter if it has not already been configured or set.
          *
          * @param filter the deserialization filter to set as the JVM-wide filter; not null
-         * @throws SecurityException if there is security manager and the
-         *       {@code SerializablePermission("serialFilter")} is not granted
          * @throws IllegalStateException if the filter has already been set or the initialization
          *       of the filter from the system property {@code jdk.serialFilter} or
          *       the security property {@code jdk.serialFilter} fails.
          */
         public static void setSerialFilter(ObjectInputFilter filter) {
             Objects.requireNonNull(filter, "filter");
-            @SuppressWarnings("removal")
-            SecurityManager sm = System.getSecurityManager();
-            if (sm != null) {
-                sm.checkPermission(ObjectStreamConstants.SERIAL_FILTER_PERMISSION);
-            }
             if (invalidFilterMessage != null) {
                 throw new IllegalStateException(invalidFilterMessage);
             }
@@ -834,17 +816,10 @@ public interface ObjectInputFilter {
          * @throws IllegalStateException if the builtin deserialization filter factory
          *         has already been replaced or any instance of {@link ObjectInputStream}
          *         has been created.
-         * @throws SecurityException if there is security manager and the
-         *       {@code SerializablePermission("serialFilter")} is not granted
          * @since 17
          */
         public static void setSerialFilterFactory(BinaryOperator<ObjectInputFilter> filterFactory) {
             Objects.requireNonNull(filterFactory, "filterFactory");
-            @SuppressWarnings("removal")
-            SecurityManager sm = System.getSecurityManager();
-            if (sm != null) {
-                sm.checkPermission(ObjectStreamConstants.SERIAL_FILTER_PERMISSION);
-            }
             if (filterFactoryNoReplace.getAndSet(true)) {
                 final String msg = serialFilterFactory != null
                         ? "Cannot replace filter factory: " + serialFilterFactory.getClass().getName()
@@ -1223,8 +1198,7 @@ public interface ObjectInputFilter {
             }
 
             /**
-             * Returns the pattern used to create this filter.
-             * @return the pattern used to create this filter
+             * {@return the pattern used to create this filter}
              */
             @Override
             public String toString() {

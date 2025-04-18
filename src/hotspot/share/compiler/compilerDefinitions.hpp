@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -38,7 +38,7 @@ enum CompilerType : u1 {
 };
 
 extern const char* compilertype2name_tab[compiler_number_of_types];     // Map CompilerType to its name
-inline const char* compilertype2name(CompilerType t) { return (uint)t < compiler_number_of_types ? compilertype2name_tab[t] : nullptr; }
+inline const char* compilertype2name(CompilerType t) { return (uint)t < compiler_number_of_types ? compilertype2name_tab[t] : "invalid"; }
 
 // Handy constants for deciding which compiler mode to use.
 enum MethodCompilation {
@@ -98,33 +98,18 @@ inline bool is_compile(int comp_level) {
   return is_c1_compile(comp_level) || is_c2_compile(comp_level);
 }
 
-
-// States of Restricted Transactional Memory usage.
-enum RTMState {
-  NoRTM      = 0x2, // Don't use RTM
-  UseRTM     = 0x1, // Use RTM
-  ProfileRTM = 0x0  // Use RTM with abort ratio calculation
-};
-
-#ifndef INCLUDE_RTM_OPT
-#define INCLUDE_RTM_OPT 0
-#endif
-#if INCLUDE_RTM_OPT
-#define RTM_OPT_ONLY(code) code
-#else
-#define RTM_OPT_ONLY(code)
-#endif
-
 class CompilerConfig : public AllStatic {
 public:
   // Scale compile thresholds
   // Returns threshold scaled with CompileThresholdScaling
   static intx scaled_compile_threshold(intx threshold, double scale);
   static intx scaled_compile_threshold(intx threshold);
+  static intx jvmflag_scaled_compile_threshold(intx threshold);
 
   // Returns freq_log scaled with CompileThresholdScaling
   static intx scaled_freq_log(intx freq_log, double scale);
   static intx scaled_freq_log(intx freq_log);
+  static intx jvmflag_scaled_freq_log(intx freq_log);
 
   static bool check_args_consistency(bool status);
 

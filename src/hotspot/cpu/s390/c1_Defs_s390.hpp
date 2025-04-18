@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2023, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2016 SAP SE. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
@@ -30,11 +30,6 @@
 enum {
   pd_lo_word_offset_in_bytes = BytesPerInt,
   pd_hi_word_offset_in_bytes = 0
-};
-
-// Explicit rounding operations are not required to implement the strictFP mode.
-enum {
-  pd_strict_fp_requires_explicit_rounding = false
 };
 
 // registers
@@ -70,6 +65,11 @@ enum {
 
 enum {
   pd_two_operand_lir_form = true
+};
+
+// the number of stack required by ArrayCopyStub
+enum {
+  pd_arraycopystub_reserved_argument_area_size = 2
 };
 
 #endif // CPU_S390_C1_DEFS_S390_HPP

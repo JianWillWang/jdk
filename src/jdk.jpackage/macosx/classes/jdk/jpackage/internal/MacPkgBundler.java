@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,7 +25,12 @@
 
 package jdk.jpackage.internal;
 
+import jdk.internal.util.Architecture;
+import jdk.internal.util.OSVersion;
+
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -51,10 +56,17 @@ import static jdk.jpackage.internal.StandardBundlerParam.VERSION;
 import static jdk.jpackage.internal.StandardBundlerParam.SIGN_BUNDLE;
 import static jdk.jpackage.internal.MacBaseInstallerBundler.SIGNING_KEYCHAIN;
 import static jdk.jpackage.internal.MacBaseInstallerBundler.SIGNING_KEY_USER;
+import static jdk.jpackage.internal.MacBaseInstallerBundler.INSTALLER_SIGN_IDENTITY;
+import static jdk.jpackage.internal.MacAppBundler.APP_IMAGE_SIGN_IDENTITY;
 import static jdk.jpackage.internal.StandardBundlerParam.APP_STORE;
 import static jdk.jpackage.internal.MacAppImageBuilder.MAC_CF_BUNDLE_IDENTIFIER;
 import static jdk.jpackage.internal.OverridableResource.createResource;
 import static jdk.jpackage.internal.StandardBundlerParam.RESOURCE_DIR;
+
+import jdk.jpackage.internal.model.ConfigException;
+import jdk.jpackage.internal.model.PackagerException;
+import jdk.jpackage.internal.util.FileUtils;
+import jdk.jpackage.internal.util.XmlUtils;
 
 public class MacPkgBundler extends MacBaseInstallerBundler {
 
@@ -107,13 +119,13 @@ public class MacPkgBundler extends MacBaseInstallerBundler {
                     String keychain = SIGNING_KEYCHAIN.fetchFrom(params);
                     String result = null;
                     if (APP_STORE.fetchFrom(params)) {
-                        result = MacBaseInstallerBundler.findKey(
+                        result = MacCertificate.findCertificateKey(
                             "3rd Party Mac Developer Installer: ",
                             user, keychain);
                     }
                     // if either not signing for app store or couldn't find
                     if (result == null) {
-                        result = MacBaseInstallerBundler.findKey(
+                        result = MacCertificate.findCertificateKey(
                             "Developer ID Installer: ", user, keychain);
                     }
 
@@ -129,13 +141,6 @@ public class MacPkgBundler extends MacBaseInstallerBundler {
 
                     return result;
                 },
-            (s, p) -> s);
-
-    public static final BundlerParamInfo<String> INSTALLER_SUFFIX =
-            new StandardBundlerParam<> (
-            "mac.pkg.installerName.suffix",
-            String.class,
-            params -> "",
             (s, p) -> s);
 
     public Path bundle(Map<String, ? super Object> params,
@@ -260,7 +265,7 @@ public class MacPkgBundler extends MacBaseInstallerBundler {
         Log.verbose(MessageFormat.format(I18N.getString(
                 "message.preparing-distribution-dist"), f.toAbsolutePath().toString()));
 
-        IOUtils.createXml(f, xml -> {
+        XmlUtils.createXml(f, xml -> {
             xml.writeStartElement("installer-gui-script");
             xml.writeAttribute("minSpecVersion", "1");
 
@@ -318,7 +323,7 @@ public class MacPkgBundler extends MacBaseInstallerBundler {
             xml.writeAttribute("customize", "never");
             xml.writeAttribute("require-scripts", "false");
             xml.writeAttribute("hostArchitectures",
-                    Platform.isArmMac() ? "arm64" : "x86_64");
+                    Architecture.isAARCH64() ? "arm64" : "x86_64");
             xml.writeEndElement(); // </options>
             xml.writeStartElement("choices-outline");
             xml.writeStartElement("line");
@@ -445,7 +450,7 @@ public class MacPkgBundler extends MacBaseInstallerBundler {
             source = appLocation;
             dest = newRoot.resolve(appLocation.getFileName());
         }
-        IOUtils.copyRecursive(source, dest);
+        FileUtils.copyRecursive(source, dest);
 
         return newRoot.toString();
     }
@@ -584,7 +589,6 @@ public class MacPkgBundler extends MacBaseInstallerBundler {
 
             // build final package
             Path finalPKG = outdir.resolve(MAC_INSTALLER_NAME.fetchFrom(params)
-                    + INSTALLER_SUFFIX.fetchFrom(params)
                     + ".pkg");
             Files.createDirectories(outdir);
 
@@ -597,15 +601,24 @@ public class MacPkgBundler extends MacBaseInstallerBundler {
             // maybe sign
             if (Optional.ofNullable(
                     SIGN_BUNDLE.fetchFrom(params)).orElse(Boolean.TRUE)) {
-                if (Platform.getMajorVersion() > 10 ||
-                    (Platform.getMajorVersion() == 10 &&
-                    Platform.getMinorVersion() >= 12)) {
+                if (OSVersion.current().compareTo(new OSVersion(10, 12)) >= 0) {
                     // we need this for OS X 10.12+
                     Log.verbose(I18N.getString("message.signing.pkg"));
                 }
 
-                String signingIdentity =
-                        DEVELOPER_ID_INSTALLER_SIGNING_KEY.fetchFrom(params);
+                String signingIdentity = null;
+                // --mac-installer-sign-identity
+                if (!INSTALLER_SIGN_IDENTITY.getIsDefaultValue(params)) {
+                    signingIdentity = INSTALLER_SIGN_IDENTITY.fetchFrom(params);
+                } else {
+                    // Use --mac-signing-key-user-name if user did not request
+                    // to sign just app image using --mac-app-image-sign-identity
+                    if (APP_IMAGE_SIGN_IDENTITY.getIsDefaultValue(params)) {
+                        // --mac-signing-key-user-name
+                        signingIdentity = DEVELOPER_ID_INSTALLER_SIGNING_KEY.fetchFrom(params);
+                    }
+                }
+
                 if (signingIdentity != null) {
                     commandLine.add("--sign");
                     commandLine.add(signingIdentity);
@@ -637,7 +650,21 @@ public class MacPkgBundler extends MacBaseInstallerBundler {
             commandLine.add(finalPKG.toAbsolutePath().toString());
 
             pb = new ProcessBuilder(commandLine);
-            IOUtils.exec(pb, false, null, true, Executor.INFINITE_TIMEOUT);
+
+            try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                 PrintStream ps = new PrintStream(baos)) {
+                try {
+                    IOUtils.exec(pb, false, ps, true, Executor.INFINITE_TIMEOUT);
+                } catch (IOException ioe) {
+                    // Log output of "productbuild" in case of
+                    // error. It should help user to diagnose
+                    // issue when using --mac-installer-sign-identity
+                    Log.info(MessageFormat.format(I18N.getString(
+                             "error.tool.failed.with.output"), "productbuild"));
+                    Log.info(baos.toString().strip());
+                    throw ioe;
+                }
+            }
 
             return finalPKG;
         } catch (Exception ignored) {
@@ -661,6 +688,7 @@ public class MacPkgBundler extends MacBaseInstallerBundler {
     }
 
     private static boolean isValidBundleIdentifier(String id) {
+        Objects.requireNonNull(id);
         for (int i = 0; i < id.length(); i++) {
             char a = id.charAt(i);
             // We check for ASCII codes first which we accept. If check fails,
@@ -685,12 +713,6 @@ public class MacPkgBundler extends MacBaseInstallerBundler {
             validateAppImageAndBundeler(params);
 
             String identifier = MAC_CF_BUNDLE_IDENTIFIER.fetchFrom(params);
-            if (identifier == null) {
-                throw new ConfigException(
-                        I18N.getString("message.app-image-requires-identifier"),
-                        I18N.getString(
-                            "message.app-image-requires-identifier.advice"));
-            }
             if (!isValidBundleIdentifier(identifier)) {
                 throw new ConfigException(
                         MessageFormat.format(I18N.getString(
@@ -701,14 +723,19 @@ public class MacPkgBundler extends MacBaseInstallerBundler {
             // reject explicitly set sign to true and no valid signature key
             if (Optional.ofNullable(
                     SIGN_BUNDLE.fetchFrom(params)).orElse(Boolean.FALSE)) {
-                String signingIdentity =
-                        DEVELOPER_ID_INSTALLER_SIGNING_KEY.fetchFrom(params);
-                if (signingIdentity == null) {
-                    throw new ConfigException(
-                            I18N.getString("error.explicit-sign-no-cert"),
-                            I18N.getString(
-                            "error.explicit-sign-no-cert.advice"));
+                if (!SIGNING_KEY_USER.getIsDefaultValue(params)) {
+                    String signingIdentity =
+                            DEVELOPER_ID_INSTALLER_SIGNING_KEY.fetchFrom(params);
+                    if (signingIdentity == null) {
+                        throw new ConfigException(
+                                I18N.getString("error.explicit-sign-no-cert"),
+                                I18N.getString(
+                                "error.explicit-sign-no-cert.advice"));
+                    }
                 }
+
+                // No need to validate --mac-installer-sign-identity, since it is
+                // pass through option.
             }
 
             // hdiutil is always available so there's no need

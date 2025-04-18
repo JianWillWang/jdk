@@ -56,6 +56,8 @@ import jdk.httpclient.test.lib.common.HttpServerAdapters;
 import jdk.httpclient.test.lib.http2.Http2TestServer;
 
 import static java.lang.System.out;
+import static java.net.http.HttpClient.Version.HTTP_1_1;
+import static java.net.http.HttpClient.Version.HTTP_2;
 import static org.testng.Assert.assertEquals;
 
 public class HeadTest implements HttpServerAdapters {
@@ -84,22 +86,21 @@ public class HeadTest implements HttpServerAdapters {
     @DataProvider(name = "positive")
     public Object[][] positive() {
         return new Object[][] {
-                { httpURI, "GET", HTTP_NOT_MODIFIED, HttpClient.Version.HTTP_1_1  },
-                { httpsURI, "GET", HTTP_NOT_MODIFIED, HttpClient.Version.HTTP_1_1  },
-                { httpURI, "GET", HTTP_NOT_MODIFIED, HttpClient.Version.HTTP_2  },
-                { httpsURI, "GET", HTTP_NOT_MODIFIED, HttpClient.Version.HTTP_2  },
-                { httpURI, "HEAD", HTTP_OK, HttpClient.Version.HTTP_1_1  },
-                { httpsURI, "HEAD", HTTP_OK, HttpClient.Version.HTTP_1_1  },
-                { httpURI, "HEAD", HTTP_OK, HttpClient.Version.HTTP_2  },
-                { httpsURI, "HEAD", HTTP_OK, HttpClient.Version.HTTP_2  },
-                { httpURI + "transfer/", "GET", HTTP_NOT_MODIFIED, HttpClient.Version.HTTP_1_1  },
-                { httpsURI + "transfer/", "GET", HTTP_NOT_MODIFIED, HttpClient.Version.HTTP_1_1  },
-                { httpURI + "transfer/", "GET", HTTP_NOT_MODIFIED, HttpClient.Version.HTTP_2  },
-                { httpsURI + "transfer/", "GET", HTTP_NOT_MODIFIED, HttpClient.Version.HTTP_2  },
-                { httpURI + "transfer/", "HEAD", HTTP_OK, HttpClient.Version.HTTP_1_1  },
-                { httpsURI + "transfer/", "HEAD", HTTP_OK, HttpClient.Version.HTTP_1_1  },
-                { httpURI + "transfer/", "HEAD", HTTP_OK, HttpClient.Version.HTTP_2  },
-                { httpsURI + "transfer/", "HEAD", HTTP_OK, HttpClient.Version.HTTP_2  }
+                // HTTP/1.1
+                { httpURI, "GET", HTTP_NOT_MODIFIED, HTTP_1_1  },
+                { httpsURI, "GET", HTTP_NOT_MODIFIED, HTTP_1_1  },
+                { httpURI, "HEAD", HTTP_OK, HTTP_1_1  },
+                { httpsURI, "HEAD", HTTP_OK, HTTP_1_1  },
+                { httpURI + "transfer/", "GET", HTTP_NOT_MODIFIED, HTTP_1_1  },
+                { httpsURI + "transfer/", "GET", HTTP_NOT_MODIFIED, HTTP_1_1  },
+                { httpURI + "transfer/", "HEAD", HTTP_OK, HTTP_1_1  },
+                { httpsURI + "transfer/", "HEAD", HTTP_OK, HTTP_1_1  },
+                // HTTP/2
+                { http2URI, "GET", HTTP_NOT_MODIFIED, HttpClient.Version.HTTP_2  },
+                { https2URI, "GET", HTTP_NOT_MODIFIED, HttpClient.Version.HTTP_2  },
+                { http2URI, "HEAD", HTTP_OK, HttpClient.Version.HTTP_2  },
+                { https2URI, "HEAD", HTTP_OK, HttpClient.Version.HTTP_2  },
+                // HTTP2 forbids transfer-encoding
         };
     }
 
@@ -110,17 +111,13 @@ public class HeadTest implements HttpServerAdapters {
         URI uri = URI.create(uriString);
         HttpRequest.Builder requestBuilder = HttpRequest
                 .newBuilder(uri)
+                .version(version)
                 .method(method, HttpRequest.BodyPublishers.noBody());
-        if (version != null) {
-            requestBuilder.version(version);
-        }
         doTest(requestBuilder.build(), expResp);
         // repeat the test this time by building the request using convenience
         // GET and HEAD methods
-        requestBuilder = HttpRequest.newBuilder(uri);
-        if (version != null) {
-            requestBuilder.version(version);
-        }
+        requestBuilder = HttpRequest.newBuilder(uri)
+                .version(version);
         switch (method) {
             case "GET" -> requestBuilder.GET();
             case "HEAD" -> requestBuilder.HEAD();
@@ -144,6 +141,7 @@ public class HeadTest implements HttpServerAdapters {
         assertEquals(response.statusCode(), expResp);
         assertEquals(response.body(), "");
         assertEquals(response.headers().firstValue("Content-length").get(), CONTENT_LEN);
+        assertEquals(response.version(), request.version().get());
     }
 
     // -- Infrastructure
@@ -156,19 +154,17 @@ public class HeadTest implements HttpServerAdapters {
 
         InetSocketAddress sa = new InetSocketAddress(InetAddress.getLoopbackAddress(), 0);
 
-        httpTestServer = HttpTestServer.of(HttpServer.create(sa, 0));
+        httpTestServer = HttpTestServer.create(HTTP_1_1);
         httpTestServer.addHandler(new HeadHandler(), "/");
         httpURI = "http://" + httpTestServer.serverAuthority() + "/";
-        HttpsServer httpsServer = HttpsServer.create(sa, 0);
-        httpsServer.setHttpsConfigurator(new HttpsConfigurator(sslContext));
-        httpsTestServer = HttpTestServer.of(httpsServer);
+        httpsTestServer = HttpTestServer.create(HTTP_1_1, sslContext);
         httpsTestServer.addHandler(new HeadHandler(),"/");
         httpsURI = "https://" + httpsTestServer.serverAuthority() + "/";
 
-        http2TestServer = HttpTestServer.of(new Http2TestServer("localhost", false, 0));
+        http2TestServer = HttpTestServer.create(HTTP_2);
         http2TestServer.addHandler(new HeadHandler(), "/");
         http2URI = "http://" + http2TestServer.serverAuthority() + "/";
-        https2TestServer = HttpTestServer.of(new Http2TestServer("localhost", true, 0));
+        https2TestServer = HttpTestServer.create(HTTP_2, sslContext);
         https2TestServer.addHandler(new HeadHandler(), "/");
         https2URI = "https://" + https2TestServer.serverAuthority() + "/";
 

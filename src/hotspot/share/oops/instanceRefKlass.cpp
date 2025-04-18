@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -22,13 +22,17 @@
  *
  */
 
-#include "precompiled.hpp"
+#include "cds/cdsConfig.hpp"
 #include "classfile/classFileParser.hpp"
 #include "classfile/javaClasses.hpp"
 #include "classfile/vmClasses.hpp"
 #include "classfile/vmSymbols.hpp"
 #include "oops/instanceRefKlass.inline.hpp"
 #include "oops/oop.inline.hpp"
+
+InstanceRefKlass::InstanceRefKlass() {
+  assert(CDSConfig::is_dumping_static_archive() || CDSConfig::is_using_archive(), "only for CDS");
+}
 
 static ReferenceType reference_subclass_name_to_type(const Symbol* name) {
   if (       name == vmSymbols::java_lang_ref_SoftReference()) {
@@ -94,7 +98,7 @@ void InstanceRefKlass::update_nonstatic_oop_maps(Klass* k) {
   const unsigned int new_count = 2; // queue and next
 
   // Verify existing map is as expected, and update if needed.
-  if (UseSharedSpaces) {
+  if (CDSConfig::is_using_archive()) {
     assert(map->offset() == new_offset, "just checking");
     assert(map->count() == new_count, "just checking");
   } else {
@@ -112,12 +116,12 @@ void InstanceRefKlass::oop_verify_on(oop obj, outputStream* st) {
   InstanceKlass::oop_verify_on(obj, st);
   // Verify referent field
   oop referent = java_lang_ref_Reference::unknown_referent_no_keepalive(obj);
-  if (referent != NULL) {
+  if (referent != nullptr) {
     guarantee(oopDesc::is_oop(referent), "referent field heap failed");
   }
   // Additional verification for next field, which must be a Reference or null
   oop next = java_lang_ref_Reference::next(obj);
-  if (next != NULL) {
+  if (next != nullptr) {
     guarantee(oopDesc::is_oop(next), "next field should be an oop");
     guarantee(next->is_instanceRef(), "next field verify failed");
   }

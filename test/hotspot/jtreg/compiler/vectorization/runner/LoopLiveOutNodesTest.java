@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2022, 2023, Arm Limited. All rights reserved.
+ * Copyright (c) 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -35,7 +36,7 @@
  *                   -XX:+WhiteBoxAPI
  *                   compiler.vectorization.runner.LoopLiveOutNodesTest
  *
- * @requires vm.compiler2.enabled & vm.flagless
+ * @requires vm.compiler2.enabled
  */
 
 package compiler.vectorization.runner;
@@ -67,7 +68,7 @@ public class LoopLiveOutNodesTest extends VectorizationTestRunner {
     }
 
     @Test
-    @IR(applyIfCPUFeatureOr = {"asimd", "true", "sse4_1", "true"},
+    @IR(applyIfCPUFeatureOr = {"asimd", "true", "sse4.1", "true", "rvv", "true"},
         counts = {IRNode.STORE_VECTOR, ">0"})
     public int SimpleIvUsed() {
         int i = 0;
@@ -79,7 +80,7 @@ public class LoopLiveOutNodesTest extends VectorizationTestRunner {
     }
 
     @Test
-    @IR(applyIfCPUFeatureOr = {"asimd", "true", "sse2", "true"},
+    @IR(applyIfCPUFeatureOr = {"asimd", "true", "sse2", "true", "rvv", "true"},
         counts = {IRNode.STORE_VECTOR, ">0"})
     public int indexedByIvUsed() {
         int i = 0;
@@ -91,7 +92,7 @@ public class LoopLiveOutNodesTest extends VectorizationTestRunner {
     }
 
     @Test
-    @IR(applyIfCPUFeatureOr = {"asimd", "true", "sse2", "true"},
+    @IR(applyIfCPUFeatureOr = {"asimd", "true", "sse2", "true", "rvv", "true"},
         counts = {IRNode.STORE_VECTOR, ">0"})
     public int ivUsedMultiple() {
         int i = 0;
@@ -103,7 +104,7 @@ public class LoopLiveOutNodesTest extends VectorizationTestRunner {
     }
 
     @Test
-    @IR(applyIfCPUFeatureOr = {"asimd", "true", "sse2", "true"},
+    @IR(applyIfCPUFeatureOr = {"asimd", "true", "sse2", "true", "rvv", "true"},
         counts = {IRNode.STORE_VECTOR, ">0"})
     public int ivUsedComplexExpr() {
         int i = 0;
@@ -115,7 +116,7 @@ public class LoopLiveOutNodesTest extends VectorizationTestRunner {
     }
 
     @Test
-    @IR(applyIfCPUFeatureOr = {"asimd", "true", "sse2", "true"},
+    @IR(applyIfCPUFeatureOr = {"asimd", "true", "sse2", "true", "rvv", "true"},
         counts = {IRNode.STORE_VECTOR, ">0"})
     public int[] ivUsedAnotherLoop() {
         int i = 0;

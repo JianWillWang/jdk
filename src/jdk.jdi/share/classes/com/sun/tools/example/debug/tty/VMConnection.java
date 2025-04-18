@@ -36,7 +36,6 @@ package com.sun.tools.example.debug.tty;
 
 import com.sun.jdi.*;
 import com.sun.jdi.connect.*;
-import com.sun.jdi.request.EventRequest;
 import com.sun.jdi.request.EventRequestManager;
 import com.sun.jdi.request.ThreadStartRequest;
 import com.sun.jdi.request.ThreadDeathRequest;
@@ -470,8 +469,6 @@ class VMConnection {
 
         ThreadStartRequest tsr = erm.createThreadStartRequest();
         ThreadDeathRequest tdr = erm.createThreadDeathRequest();
-        tsr.setSuspendPolicy(EventRequest.SUSPEND_NONE);
-        tdr.setSuspendPolicy(EventRequest.SUSPEND_NONE);
         if (!trackVthreads) {
             tsr.addPlatformThreadsOnlyFilter();
             tdr.addPlatformThreadsOnlyFilter();
@@ -547,16 +544,18 @@ class VMConnection {
         } catch (IOException ioe) {
             ioe.printStackTrace();
             MessageOutput.fatalError("Unable to launch target VM.");
+            throw new RuntimeException(ioe);
         } catch (IllegalConnectorArgumentsException icae) {
             icae.printStackTrace();
             MessageOutput.fatalError("Internal debugger error.");
+            throw new RuntimeException(icae);
         } catch (VMStartException vmse) {
             MessageOutput.println("vmstartexception", vmse.getMessage());
             MessageOutput.println();
             dumpFailedLaunchInfo(vmse.process());
             MessageOutput.fatalError("Target VM failed to initialize.");
+            throw new RuntimeException(vmse);
         }
-        return null; // Shuts up the compiler
     }
 
     /* attach to running target vm */
@@ -567,11 +566,12 @@ class VMConnection {
         } catch (IOException ioe) {
             ioe.printStackTrace();
             MessageOutput.fatalError("Unable to attach to target VM.");
+            throw new RuntimeException(ioe);
         } catch (IllegalConnectorArgumentsException icae) {
             icae.printStackTrace();
             MessageOutput.fatalError("Internal debugger error.");
+            throw new RuntimeException(icae);
         }
-        return null; // Shuts up the compiler
     }
 
     /* listen for connection from target vm */
@@ -586,10 +586,11 @@ class VMConnection {
         } catch (IOException ioe) {
             ioe.printStackTrace();
             MessageOutput.fatalError("Unable to attach to target VM.");
+            throw new RuntimeException(ioe);
         } catch (IllegalConnectorArgumentsException icae) {
             icae.printStackTrace();
             MessageOutput.fatalError("Internal debugger error.");
+            throw new RuntimeException(icae);
         }
-        return null; // Shuts up the compiler
     }
 }

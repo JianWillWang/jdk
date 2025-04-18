@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -162,6 +162,7 @@ public class AquaFileChooserUI extends FileChooserUI {
     protected String filenameTextFieldToolTipText = null;
     protected String filterComboBoxToolTipText = null;
     protected String openDirectoryButtonToolTipText = null;
+    protected String chooseButtonToolTipText = null;
 
     protected String cancelOpenButtonToolTipText = null;
     protected String cancelSaveButtonToolTipText = null;
@@ -323,6 +324,7 @@ public class AquaFileChooserUI extends FileChooserUI {
         // Mac-specific, required
         newFolderExistsErrorText = getString("FileChooser.newFolderExistsErrorText", "That name is already taken");
         chooseButtonText = getString("FileChooser.chooseButtonText", "Choose");
+        chooseButtonToolTipText = getString("FileChooser.chooseButtonToolTipText", "Choose selected file");
         newFolderButtonText = getString("FileChooser.newFolderButtonText", "New");
         newFolderTitleText = getString("FileChooser.newFolderTitleText", "New Folder");
 
@@ -397,6 +399,7 @@ public class AquaFileChooserUI extends FileChooserUI {
         cancelSaveButtonToolTipText = null;
         cancelChooseButtonToolTipText = null;
         cancelNewFolderButtonToolTipText = null;
+        chooseButtonToolTipText = null;
 
         saveButtonToolTipText = null;
         openButtonToolTipText = null;
@@ -740,6 +743,10 @@ public class AquaFileChooserUI extends FileChooserUI {
 
         public void mouseClicked(final MouseEvent e) {
             if (e.getClickCount() != 2) return;
+
+            if (!getFileChooser().isEnabled()) {
+                return;
+            }
 
             final int index = list.locationToIndex(e.getPoint());
             if (index < 0) return;
@@ -1233,7 +1240,6 @@ public class AquaFileChooserUI extends FileChooserUI {
         return new Dimension(Integer.MAX_VALUE, Integer.MAX_VALUE);
     }
 
-    @SuppressWarnings("serial") // anonymous class
     protected ListCellRenderer<File> createDirectoryComboBoxRenderer(final JFileChooser fc) {
         return new AquaComboBoxRendererInternal<File>(directoryComboBox) {
             public Component getListCellRendererComponent(final JList<? extends File> list,
@@ -1256,7 +1262,7 @@ public class AquaFileChooserUI extends FileChooserUI {
     }
 
     //
-    // DataModel for DirectoryComboxbox
+    // DataModel for DirectoryCombobox
     //
     protected DirectoryComboBoxModel createDirectoryComboBoxModel(final JFileChooser fc) {
         return new DirectoryComboBoxModel();
@@ -1349,7 +1355,6 @@ public class AquaFileChooserUI extends FileChooserUI {
     //
     // Renderer for Types ComboBox
     //
-    @SuppressWarnings("serial") // anonymous class
     protected ListCellRenderer<FileFilter> createFilterComboBoxRenderer() {
         return new AquaComboBoxRendererInternal<FileFilter>(filterComboBox) {
             public Component getListCellRendererComponent(final JList<? extends FileFilter> list,
@@ -1365,7 +1370,7 @@ public class AquaFileChooserUI extends FileChooserUI {
     }
 
     //
-    // DataModel for Types Comboxbox
+    // DataModel for Types Combobox
     //
     protected FilterComboBoxModel createFilterComboBoxModel() {
         return new FilterComboBoxModel();
@@ -1409,9 +1414,9 @@ public class AquaFileChooserUI extends FileChooserUI {
 
         public Object getSelectedItem() {
             // Ensure that the current filter is in the list.
-            // NOTE: we shouldnt' have to do this, since JFileChooser adds
+            // NOTE: we shouldn't have to do this, since JFileChooser adds
             // the filter to the choosable filters list when the filter
-            // is set. Lets be paranoid just in case someone overrides
+            // is set. Let's be paranoid just in case someone overrides
             // setFileFilter in JFileChooser.
             FileFilter currentFilter = getFileChooser().getFileFilter();
             boolean found = false;
@@ -1497,6 +1502,9 @@ public class AquaFileChooserUI extends FileChooserUI {
 
         // Instead of dragging, it selects which one to sort by
         public void setDraggedColumn(final TableColumn aColumn) {
+            if (!getFileChooser().isEnabled()) {
+                return;
+            }
             if (aColumn != null) {
                 final int colIndex = aColumn.getModelIndex();
                 if (colIndex != fSortColumn) {
@@ -1601,7 +1609,6 @@ public class AquaFileChooserUI extends FileChooserUI {
 
         tPanel.add(labelArea);
         // separator line
-        @SuppressWarnings("serial") // anonymous class
         final JSeparator sep = new JSeparator(){
             public Dimension getPreferredSize() {
                 return new Dimension(((JComponent)getParent()).getWidth(), 3);
@@ -1837,6 +1844,10 @@ public class AquaFileChooserUI extends FileChooserUI {
             // The autoscroller can generate drag events outside the Table's range.
             if ((column == -1) || (row == -1)) { return; }
 
+            if (!getFileChooser().isEnabled()) {
+                return;
+            }
+
             final File clickedFile = (File)(fFileList.getValueAt(row, 0));
 
             // rdar://problem/3734130 -- don't populate the text field if this file isn't selectable in this mode.
@@ -2051,9 +2062,9 @@ public class AquaFileChooserUI extends FileChooserUI {
             return fc.getApproveButtonMnemonic();
         }
 
-        // No fallback
         String getApproveButtonToolTipText(final JFileChooser fc) {
-            return getApproveButtonToolTipText(fc, null);
+            // Fallback to "Choose selected file"
+            return getApproveButtonToolTipText(fc, chooseButtonToolTipText);
         }
 
         String getApproveButtonToolTipText(final JFileChooser fc, final String fallbackText) {

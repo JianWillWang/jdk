@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2017, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -22,7 +22,6 @@
  *
  */
 
-#include "precompiled.hpp"
 #include "classfile/stringTable.hpp"
 #include "gc/shared/gc_globals.hpp"
 #include "gc/shared/oopStorage.inline.hpp"
@@ -41,7 +40,7 @@
 #include "prims/jvmtiTagMap.hpp"
 #endif // INCLUDE_JVMTI
 
-void notify_jvmti_tagmaps() {
+static void notify_jvmti_tagmaps() {
 #if INCLUDE_JVMTI
   // Notify JVMTI tagmaps that a STW weak reference processing might be
   // clearing entries, so the tagmaps need cleaning.  Doing this here allows

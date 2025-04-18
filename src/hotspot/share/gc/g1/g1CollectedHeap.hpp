@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2001, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -36,17 +36,16 @@
 #include "gc/g1/g1EvacStats.hpp"
 #include "gc/g1/g1GCPauseType.hpp"
 #include "gc/g1/g1HeapRegionAttr.hpp"
+#include "gc/g1/g1HeapRegionManager.hpp"
+#include "gc/g1/g1HeapRegionSet.hpp"
 #include "gc/g1/g1HeapTransition.hpp"
 #include "gc/g1/g1HeapVerifier.hpp"
-#include "gc/g1/g1HRPrinter.hpp"
 #include "gc/g1/g1MonitoringSupport.hpp"
 #include "gc/g1/g1MonotonicArenaFreeMemoryTask.hpp"
 #include "gc/g1/g1MonotonicArenaFreePool.hpp"
 #include "gc/g1/g1NUMA.hpp"
 #include "gc/g1/g1SurvivorRegions.hpp"
-#include "gc/g1/g1YoungGCEvacFailureInjector.hpp"
-#include "gc/g1/heapRegionManager.hpp"
-#include "gc/g1/heapRegionSet.hpp"
+#include "gc/g1/g1YoungGCAllocationFailureInjector.hpp"
 #include "gc/shared/barrierSet.hpp"
 #include "gc/shared/collectedHeap.hpp"
 #include "gc/shared/gcHeapSummary.hpp"
@@ -57,6 +56,7 @@
 #include "memory/iterator.hpp"
 #include "memory/memRegion.hpp"
 #include "runtime/mutexLocker.hpp"
+#include "runtime/threadSMR.hpp"
 #include "utilities/bitMap.hpp"
 
 // A "G1CollectedHeap" is an implementation of a java heap for HotSpot.
@@ -66,7 +66,6 @@
 
 // Forward declarations
 class G1Allocator;
-class G1ArchiveAllocator;
 class G1BatchedTask;
 class G1CardTableEntryClosure;
 class G1ConcurrentMark;
@@ -75,15 +74,15 @@ class G1ConcurrentRefine;
 class G1GCCounters;
 class G1GCPhaseTimes;
 class G1HeapSizingPolicy;
-class G1HotCardCache;
 class G1NewTracer;
 class G1RemSet;
 class G1ServiceTask;
 class G1ServiceThread;
 class GCMemoryManager;
-class HeapRegion;
+class G1HeapRegion;
 class MemoryPool;
 class nmethod;
+class PartialArrayStateManager;
 class ReferenceProcessor;
 class STWGCTimer;
 class WorkerThreads;
@@ -120,6 +119,32 @@ class G1RegionMappingChangedListener : public G1MappingChangedListener {
   void on_commit(uint start_idx, size_t num_regions, bool zero_filled) override;
 };
 
+// Helper to claim contiguous sets of JavaThread for processing by multiple threads.
+class G1JavaThreadsListClaimer : public StackObj {
+  ThreadsListHandle _list;
+  uint _claim_step;
+
+  volatile uint _cur_claim;
+
+  // Attempts to claim _claim_step JavaThreads, returning an array of claimed
+  // JavaThread* with count elements. Returns null (and a zero count) if there
+  // are no more threads to claim.
+  JavaThread* const* claim(uint& count);
+
+public:
+  G1JavaThreadsListClaimer(uint claim_step) : _list(), _claim_step(claim_step), _cur_claim(0) {
+    assert(claim_step > 0, "must be");
+  }
+
+  // Executes the given closure on the elements of the JavaThread list, chunking the
+  // JavaThread set in claim_step chunks for each caller to reduce parallelization
+  // overhead.
+  void apply(ThreadClosure* cl);
+
+  // Total number of JavaThreads that can be claimed.
+  uint length() const { return _list.length(); }
+};
+
 class G1CollectedHeap : public CollectedHeap {
   friend class VM_G1CollectForAllocation;
   friend class VM_G1CollectFull;
@@ -138,7 +163,7 @@ class G1CollectedHeap : public CollectedHeap {
 
   // Other related classes.
   friend class G1HeapPrinterMark;
-  friend class HeapRegionClaimer;
+  friend class G1HeapRegionClaimer;
 
   // Testing classes.
   friend class G1CheckRegionAttrTableClosure;
@@ -153,14 +178,11 @@ private:
 
   Ticks _collection_pause_end;
 
-  SoftRefPolicy      _soft_ref_policy;
-
   static size_t _humongous_object_threshold_in_words;
 
-  // These sets keep track of old, archive and humongous regions respectively.
-  HeapRegionSet _old_set;
-  HeapRegionSet _archive_set;
-  HeapRegionSet _humongous_set;
+  // These sets keep track of old and humongous regions respectively.
+  G1HeapRegionSet _old_set;
+  G1HeapRegionSet _humongous_set;
 
   // Young gen memory statistics before GC.
   G1MonotonicArenaMemoryStats _young_gen_card_set_stats;
@@ -175,7 +197,7 @@ public:
   // Start a new incremental collection set for the next pause.
   void start_new_collection_set();
 
-  void prepare_region_for_full_compaction(HeapRegion* hr);
+  void prepare_region_for_full_compaction(G1HeapRegion* hr);
 
 private:
   // Rebuilds the region sets / lists so that they are repopulated to
@@ -191,12 +213,12 @@ private:
   G1NUMA* _numa;
 
   // The sequence of all heap regions in the heap.
-  HeapRegionManager _hrm;
+  G1HeapRegionManager _hrm;
 
   // Manages all allocations with regions except humongous object allocations.
   G1Allocator* _allocator;
 
-  G1YoungGCEvacFailureInjector _evac_failure_injector;
+  G1YoungGCAllocationFailureInjector _allocation_failure_injector;
 
   // Manages all heap verification.
   G1HeapVerifier* _verifier;
@@ -218,9 +240,6 @@ public:
   size_t bytes_used_during_gc() const { return _bytes_used_during_gc; }
 
 private:
-  // Class that handles archive allocation ranges.
-  G1ArchiveAllocator* _archive_allocator;
-
   // GC allocation statistics policy for survivors.
   G1EvacStats _survivor_evac_stats;
 
@@ -243,9 +262,8 @@ public:
   void set_collection_set_candidates_stats(G1MonotonicArenaMemoryStats& stats);
   void set_young_gen_card_set_stats(const G1MonotonicArenaMemoryStats& stats);
 
+  void update_parallel_gc_threads_cpu_time();
 private:
-
-  G1HRPrinter _hr_printer;
 
   // Return true if an explicit GC should start a concurrent cycle instead
   // of doing a STW full GC. A concurrent cycle should be started if:
@@ -262,6 +280,9 @@ private:
                                 uint gc_counter,
                                 uint old_marking_started_before);
 
+  bool try_collect_fullgc(GCCause::Cause cause,
+                          const G1GCCounters& counters_before);
+
   // indicates whether we are in young or mixed GC mode
   G1CollectorState _collector_state;
 
@@ -272,14 +293,6 @@ private:
   // Keeps track of how many "old marking cycles" (i.e., Full GCs or
   // concurrent cycles) we have completed.
   volatile uint _old_marking_cycles_completed;
-
-  // This is a non-product method that is helpful for testing. It is
-  // called at the end of a GC and artificially expands the heap by
-  // allocating a number of dead regions. This way we can induce very
-  // frequent marking cycles and stress the cleanup / concurrent
-  // cleanup code more (as all the regions that will be allocated by
-  // this method will be found dead by the marking cycle).
-  void allocate_dummy_regions() PRODUCT_RETURN;
 
   // Create a memory mapper for auxiliary data structures of the given size and
   // translation factor.
@@ -336,10 +349,10 @@ private:
                                    "should not be at a safepoint"));          \
   } while (0)
 
-#define assert_at_safepoint_on_vm_thread()                                    \
-  do {                                                                        \
-    assert_at_safepoint();                                                    \
-    assert(Thread::current_or_null() != NULL, "no current thread");           \
+#define assert_at_safepoint_on_vm_thread()                                        \
+  do {                                                                            \
+    assert_at_safepoint();                                                        \
+    assert(Thread::current_or_null() != nullptr, "no current thread");            \
     assert(Thread::current()->is_VM_thread(), "current thread is not VM thread"); \
   } while (0)
 
@@ -348,8 +361,8 @@ private:
   do {                                                                        \
     size_t cur_used_bytes = g1h->used();                                      \
     size_t recal_used_bytes = g1h->recalculate_used();                        \
-    assert(cur_used_bytes == recal_used_bytes, "Used(" SIZE_FORMAT ") is not" \
-           " same as recalculated used(" SIZE_FORMAT ").",                    \
+    assert(cur_used_bytes == recal_used_bytes, "Used(%zu) is not" \
+           " same as recalculated used(%zu).",                    \
            cur_used_bytes, recal_used_bytes);                                 \
   } while (0)
 #else
@@ -370,25 +383,25 @@ private:
 
   G1CollectionSet _collection_set;
 
-  // Try to allocate a single non-humongous HeapRegion sufficient for
+  // Try to allocate a single non-humongous G1HeapRegion sufficient for
   // an allocation of the given word_size. If do_expand is true,
   // attempt to expand the heap if necessary to satisfy the allocation
   // request. 'type' takes the type of region to be allocated. (Use constants
-  // Old, Eden, Humongous, Survivor defined in HeapRegionType.)
-  HeapRegion* new_region(size_t word_size,
-                         HeapRegionType type,
-                         bool do_expand,
-                         uint node_index = G1NUMA::AnyNodeIndex);
+  // Old, Eden, Humongous, Survivor defined in G1HeapRegionType.)
+  G1HeapRegion* new_region(size_t word_size,
+                           G1HeapRegionType type,
+                           bool do_expand,
+                           uint node_index = G1NUMA::AnyNodeIndex);
 
   // Initialize a contiguous set of free regions of length num_regions
   // and starting at index first so that they appear as a single
   // humongous region.
-  HeapWord* humongous_obj_allocate_initialize_regions(HeapRegion* first_hr,
+  HeapWord* humongous_obj_allocate_initialize_regions(G1HeapRegion* first_hr,
                                                       uint num_regions,
                                                       size_t word_size);
 
   // Attempt to allocate a humongous object of the given size. Return
-  // NULL if unsuccessful.
+  // null if unsuccessful.
   HeapWord* humongous_obj_allocate(size_t word_size);
 
   // The following two methods, allocate_new_tlab() and
@@ -411,7 +424,7 @@ private:
   //   retry the allocation.
   //
   // * If all allocation attempts fail, even after trying to schedule
-  //   an evacuation pause, allocate_new_tlab() will return NULL,
+  //   an evacuation pause, allocate_new_tlab() will return null,
   //   whereas mem_allocate() will attempt a heap expansion and/or
   //   schedule a Full GC.
   //
@@ -437,7 +450,7 @@ private:
   // Second-level mutator allocation attempt: take the Heap_lock and
   // retry the allocation attempt, potentially scheduling a GC
   // pause. This should only be used for non-humongous allocations.
-  HeapWord* attempt_allocation_slow(size_t word_size);
+  HeapWord* attempt_allocation_slow(uint node_index, size_t word_size);
 
   // Takes the Heap_lock and attempts a humongous allocation. It can
   // potentially schedule a GC pause.
@@ -445,7 +458,7 @@ private:
 
   // Allocation attempt that should be called during safepoints (e.g.,
   // at the end of a successful GC). expect_null_mutator_alloc_region
-  // specifies whether the mutator alloc region is expected to be NULL
+  // specifies whether the mutator alloc region is expected to be null
   // or not.
   HeapWord* attempt_allocation_at_safepoint(size_t word_size,
                                             bool expect_null_mutator_alloc_region);
@@ -453,26 +466,23 @@ private:
   // These methods are the "callbacks" from the G1AllocRegion class.
 
   // For mutator alloc regions.
-  HeapRegion* new_mutator_alloc_region(size_t word_size, bool force, uint node_index);
-  void retire_mutator_alloc_region(HeapRegion* alloc_region,
+  G1HeapRegion* new_mutator_alloc_region(size_t word_size, uint node_index);
+  void retire_mutator_alloc_region(G1HeapRegion* alloc_region,
                                    size_t allocated_bytes);
 
   // For GC alloc regions.
   bool has_more_regions(G1HeapRegionAttr dest);
-  HeapRegion* new_gc_alloc_region(size_t word_size, G1HeapRegionAttr dest, uint node_index);
-  void retire_gc_alloc_region(HeapRegion* alloc_region,
+  G1HeapRegion* new_gc_alloc_region(size_t word_size, G1HeapRegionAttr dest, uint node_index);
+  void retire_gc_alloc_region(G1HeapRegion* alloc_region,
                               size_t allocated_bytes, G1HeapRegionAttr dest);
 
-  // - if explicit_gc is true, the GC is for a System.gc() etc,
-  //   otherwise it's for a failed allocation.
   // - if clear_all_soft_refs is true, all soft references should be
   //   cleared during the GC.
   // - if do_maximal_compaction is true, full gc will do a maximally
   //   compacting collection, leaving no dead wood.
   // - it returns false if it is unable to do the collection due to the
   //   GC locker being active, true otherwise.
-  bool do_full_collection(bool explicit_gc,
-                          bool clear_all_soft_refs,
+  bool do_full_collection(bool clear_all_soft_refs,
                           bool do_maximal_compaction);
 
   // Callback from VM_G1CollectFull operation, or collect_as_vm_thread.
@@ -489,9 +499,9 @@ private:
   // Internal helpers used during full GC to split it up to
   // increase readability.
   bool abort_concurrent_cycle();
-  void verify_before_full_collection(bool explicit_gc);
+  void verify_before_full_collection();
   void prepare_heap_for_full_collection();
-  void prepare_heap_for_mutators();
+  void prepare_for_mutator_after_full_collection();
   void abort_refinement();
   void verify_after_full_collection();
   void print_heap_after_full_collection();
@@ -506,7 +516,7 @@ private:
   // Attempting to expand the heap sufficiently
   // to support an allocation of the given "word_size".  If
   // successful, perform the allocation and return the address of the
-  // allocated block, or else "NULL".
+  // allocated block, or else null.
   HeapWord* expand_and_allocate(size_t word_size);
 
   void verify_numa_regions(const char* desc);
@@ -536,7 +546,7 @@ public:
     return _allocator;
   }
 
-  G1YoungGCEvacFailureInjector* evac_failure_injector() { return &_evac_failure_injector; }
+  G1YoungGCAllocationFailureInjector* allocation_failure_injector() { return &_allocation_failure_injector; }
 
   G1HeapVerifier* verifier() {
     return _verifier;
@@ -546,6 +556,9 @@ public:
     assert(_monitoring_support != nullptr, "should have been initialized");
     return _monitoring_support;
   }
+
+  void pin_object(JavaThread* thread, oop obj) override;
+  void unpin_object(JavaThread* thread, oop obj) override;
 
   void resize_heap_if_necessary();
 
@@ -560,8 +573,8 @@ public:
   // Expand the garbage-first heap by at least the given size (in bytes!).
   // Returns true if the heap was expanded by the requested amount;
   // false otherwise.
-  // (Rounds up to a HeapRegion boundary.)
-  bool expand(size_t expand_bytes, WorkerThreads* pretouch_workers = NULL, double* expand_time_ms = NULL);
+  // (Rounds up to a G1HeapRegion boundary.)
+  bool expand(size_t expand_bytes, WorkerThreads* pretouch_workers = nullptr, double* expand_time_ms = nullptr);
   bool expand_single_region(uint node_index);
 
   // Returns the PLAB statistics for a given destination.
@@ -581,7 +594,7 @@ public:
   void gc_epilogue(bool full);
 
   // Does the given region fulfill remembered set based eager reclaim candidate requirements?
-  bool is_potential_eager_reclaim_candidate(HeapRegion* r) const;
+  bool is_potential_eager_reclaim_candidate(G1HeapRegion* r) const;
 
   inline bool is_humongous_reclaim_candidate(uint region);
 
@@ -592,17 +605,22 @@ public:
   // Register the given region to be part of the collection set.
   inline void register_humongous_candidate_region_with_region_attr(uint index);
 
+  void set_humongous_metadata(G1HeapRegion* first_hr,
+                              uint num_regions,
+                              size_t word_size,
+                              bool update_remsets);
+
   // We register a region with the fast "in collection set" test. We
   // simply set to true the array slot corresponding to this region.
-  void register_young_region_with_region_attr(HeapRegion* r) {
-    _region_attr.set_in_young(r->hrm_index());
+  void register_young_region_with_region_attr(G1HeapRegion* r) {
+    _region_attr.set_in_young(r->hrm_index(), r->has_pinned_objects());
   }
-  inline void register_new_survivor_region_with_region_attr(HeapRegion* r);
-  inline void register_region_with_region_attr(HeapRegion* r);
-  inline void register_old_region_with_region_attr(HeapRegion* r);
-  inline void register_optional_region_with_region_attr(HeapRegion* r);
+  inline void register_new_survivor_region_with_region_attr(G1HeapRegion* r);
+  inline void register_region_with_region_attr(G1HeapRegion* r);
+  inline void register_old_region_with_region_attr(G1HeapRegion* r);
+  inline void register_optional_region_with_region_attr(G1HeapRegion* r);
 
-  void clear_region_attr(const HeapRegion* hr) {
+  void clear_region_attr(const G1HeapRegion* hr) {
     _region_attr.clear(hr);
   }
 
@@ -614,7 +632,7 @@ public:
   // for all regions.
   void verify_region_attr_remset_is_tracked() PRODUCT_RETURN;
 
-  void clear_bitmap_for_region(HeapRegion* hr);
+  void clear_bitmap_for_region(G1HeapRegion* hr);
 
   bool is_user_requested_concurrent_full_gc(GCCause::Cause cause);
 
@@ -649,23 +667,19 @@ public:
     return _old_marking_cycles_completed;
   }
 
-  G1HRPrinter* hr_printer() { return &_hr_printer; }
-
   // Allocates a new heap region instance.
-  HeapRegion* new_heap_region(uint hrs_index, MemRegion mr);
-
-  // Allocate the highest free region in the reserved heap. This will commit
-  // regions as necessary.
-  HeapRegion* alloc_highest_free_region();
+  G1HeapRegion* new_heap_region(uint hrs_index, MemRegion mr);
 
   // Frees a region by resetting its metadata and adding it to the free list
   // passed as a parameter (this is usually a local list which will be appended
-  // to the master free list later or NULL if free list management is handled
+  // to the master free list later or null if free list management is handled
   // in another way).
   // Callers must ensure they are the only one calling free on the given region
   // at the same time.
-  void free_region(HeapRegion* hr, FreeRegionList* free_list);
+  void free_region(G1HeapRegion* hr, G1FreeRegionList* free_list);
 
+  // Add the given region to the retained regions collection set candidates.
+  void retain_region(G1HeapRegion* hr);
   // It dirties the cards that cover the block so that the post
   // write barrier never queues anything when updating objects on this
   // block. It is assumed (and in fact we assert) that the block
@@ -679,60 +693,36 @@ public:
   // list later).
   // The method assumes that only a single thread is ever calling
   // this for a particular region at once.
-  void free_humongous_region(HeapRegion* hr,
-                             FreeRegionList* free_list);
+  void free_humongous_region(G1HeapRegion* hr,
+                             G1FreeRegionList* free_list);
 
-  // Facility for allocating in 'archive' regions in high heap memory and
-  // recording the allocated ranges. These should all be called from the
-  // VM thread at safepoints, without the heap lock held. They can be used
-  // to create and archive a set of heap regions which can be mapped at the
-  // same fixed addresses in a subsequent JVM invocation.
-  void begin_archive_alloc_range(bool open = false);
+  // Execute func(G1HeapRegion* r, bool is_last) on every region covered by the
+  // given range.
+  template <typename Func>
+  void iterate_regions_in_range(MemRegion range, const Func& func);
 
-  // Check if the requested size would be too large for an archive allocation.
-  bool is_archive_alloc_too_large(size_t word_size);
+  // Commit the required number of G1 region(s) according to the size requested
+  // and mark them as 'old' region(s). Preferred address is treated as a hint for
+  // the location of the archive space in the heap. The returned address may or may
+  // not be same as the preferred address.
+  // This API is only used for allocating heap space for the archived heap objects
+  // in the CDS archive.
+  HeapWord* alloc_archive_region(size_t word_size, HeapWord* preferred_addr);
 
-  // Allocate memory of the requested size from the archive region. This will
-  // return NULL if the size is too large or if no memory is available. It
-  // does not trigger a garbage collection.
-  HeapWord* archive_mem_allocate(size_t word_size);
+  // Populate the G1BlockOffsetTable for archived regions with the given
+  // memory range.
+  void populate_archive_regions_bot(MemRegion range);
 
-  // Optionally aligns the end address and returns the allocated ranges in
-  // an array of MemRegions in order of ascending addresses.
-  void end_archive_alloc_range(GrowableArray<MemRegion>* ranges,
-                               size_t end_alignment_in_bytes = 0);
-
-  // Facility for allocating a fixed range within the heap and marking
-  // the containing regions as 'archive'. For use at JVM init time, when the
-  // caller may mmap archived heap data at the specified range(s).
-  // Verify that the MemRegions specified in the argument array are within the
-  // reserved heap.
-  bool check_archive_addresses(MemRegion* range, size_t count);
-
-  // Commit the appropriate G1 regions containing the specified MemRegions
-  // and mark them as 'archive' regions. The regions in the array must be
-  // non-overlapping and in order of ascending address.
-  bool alloc_archive_regions(MemRegion* range, size_t count, bool open);
-
-  // Insert any required filler objects in the G1 regions around the specified
-  // ranges to make the regions parseable. This must be called after
-  // alloc_archive_regions, and after class loading has occurred.
-  void fill_archive_regions(MemRegion* range, size_t count);
-
-  // Populate the G1BlockOffsetTablePart for archived regions with the given
-  // memory ranges.
-  void populate_archive_regions_bot_part(MemRegion* range, size_t count);
-
-  // For each of the specified MemRegions, uncommit the containing G1 regions
+  // For the specified range, uncommit the containing G1 regions
   // which had been allocated by alloc_archive_regions. This should be called
-  // rather than fill_archive_regions at JVM init time if the archive file
-  // mapping failed, with the same non-overlapping and sorted MemRegion array.
-  void dealloc_archive_regions(MemRegion* range, size_t count);
+  // at JVM init time if the archive heap's contents cannot be used (e.g., if
+  // CRC check fails).
+  void dealloc_archive_regions(MemRegion range);
 
 private:
 
   // Shrink the garbage-first heap by at most the given size (in bytes!).
-  // (Rounds down to a HeapRegion boundary.)
+  // (Rounds down to a G1HeapRegion boundary.)
   void shrink(size_t shrink_bytes);
   void shrink_helper(size_t expand_bytes);
 
@@ -756,14 +746,13 @@ private:
   // false if unable to do the collection due to the GC locker being
   // active, true otherwise.
   // precondition: at safepoint on VM thread
-  // precondition: !is_gc_active()
+  // precondition: !is_stw_gc_active()
   bool do_collection_pause_at_safepoint();
 
   // Helper for do_collection_pause_at_safepoint, containing the guts
   // of the incremental collection pause, executed by the vm thread.
   void do_collection_pause_at_safepoint_helper();
 
-  G1HeapVerifier::G1VerifyType young_collection_verify_type() const;
   void verify_before_young_collection(G1HeapVerifier::G1VerifyType type);
   void verify_after_young_collection(G1HeapVerifier::G1VerifyType type);
 
@@ -771,18 +760,19 @@ public:
   // Start a concurrent cycle.
   void start_concurrent_cycle(bool concurrent_operation_is_full_mark);
 
-  void prepare_tlabs_for_mutator();
+  void prepare_for_mutator_after_young_collection();
 
   void retire_tlabs();
+
+  // Update all region's pin counts from the per-thread caches and resets them.
+  // Must be called before any decision based on pin counts.
+  void flush_region_pin_cache();
 
   void expand_heap_after_young_collection();
   // Update object copying statistics.
   void record_obj_copy_mem_stats();
 
 private:
-  // The hot card cache for remembered set insertion optimization.
-  G1HotCardCache* _hot_card_cache;
-
   // The g1 remembered set of the heap.
   G1RemSet* _rem_set;
   // Global card set configuration
@@ -790,7 +780,19 @@ private:
 
   G1MonotonicArenaFreePool _card_set_freelist_pool;
 
+  // Group cardsets
+  G1CSetCandidateGroup _young_regions_cset_group;
+
 public:
+  G1CardSetConfiguration* card_set_config() { return &_card_set_config; }
+
+  G1CSetCandidateGroup* young_regions_cset_group() { return &_young_regions_cset_group; }
+  G1CardSet* young_regions_cardset() { return _young_regions_cset_group.card_set(); };
+
+  G1MonotonicArenaMemoryStats young_regions_card_set_memory_stats() { return _young_regions_cset_group.card_set_memory_stats(); }
+
+  void prepare_group_cardsets_for_scan();
+
   // After a collection pause, reset eden and the collection set.
   void clear_eden();
   void clear_collection_set();
@@ -806,8 +808,9 @@ public:
   // The concurrent refiner.
   G1ConcurrentRefine* _cr;
 
-  // The parallel task queues
-  G1ScannerTasksQueueSet *_task_queues;
+  // Reusable parallel task queues and partial array manager.
+  G1ScannerTasksQueueSet* _task_queues;
+  PartialArrayStateManager* _partial_array_state_manager;
 
   // ("Weak") Reference processing support.
   //
@@ -873,6 +876,8 @@ public:
   G1ScannerTasksQueueSet* task_queues() const;
   G1ScannerTasksQueue* task_queue(uint i) const;
 
+  PartialArrayStateManager* partial_array_state_manager() const;
+
   // Create a G1CollectedHeap.
   // Must call the initialize method afterwards.
   // May not return if something goes wrong.
@@ -924,7 +929,7 @@ public:
   const G1CollectionSet* collection_set() const { return &_collection_set; }
   G1CollectionSet* collection_set() { return &_collection_set; }
 
-  SoftRefPolicy* soft_ref_policy() override;
+  inline bool is_collection_set_candidate(const G1HeapRegion* r) const;
 
   void initialize_serviceability() override;
   MemoryUsage memory_usage() override;
@@ -935,9 +940,6 @@ public:
 
   static void start_codecache_marking_cycle_if_inactive(bool concurrent_mark_start);
   static void finish_codecache_marking_cycle();
-
-  // Apply the given closure on all cards in the Hot Card Cache, emptying it.
-  void iterate_hcc_closure(G1CardTableEntryClosure* cl, uint worker_id);
 
   // The shared block offset table array.
   G1BlockOffsetTable* bot() const { return _bot; }
@@ -1002,23 +1004,21 @@ public:
   uint num_used_regions() const { return num_regions() - num_free_regions(); }
 
 #ifdef ASSERT
-  bool is_on_master_free_list(HeapRegion* hr) {
+  bool is_on_master_free_list(G1HeapRegion* hr) {
     return _hrm.is_free(hr);
   }
 #endif // ASSERT
 
-  inline void old_set_add(HeapRegion* hr);
-  inline void old_set_remove(HeapRegion* hr);
-
-  inline void archive_set_add(HeapRegion* hr);
+  inline void old_set_add(G1HeapRegion* hr);
+  inline void old_set_remove(G1HeapRegion* hr);
 
   size_t non_young_capacity_bytes() {
-    return (old_regions_count() + _archive_set.length() + humongous_regions_count()) * HeapRegion::GrainBytes;
+    return (old_regions_count() + humongous_regions_count()) * G1HeapRegion::GrainBytes;
   }
 
   // Determine whether the given region is one that we are using as an
   // old GC alloc region.
-  bool is_old_gc_alloc_region(HeapRegion* hr);
+  bool is_old_gc_alloc_region(G1HeapRegion* hr);
 
   // Perform a collection of the heap; intended for use in implementing
   // "System.gc".  This probably implies as full a collection as the
@@ -1032,16 +1032,15 @@ public:
   void start_concurrent_gc_for_metadata_allocation(GCCause::Cause gc_cause);
 
   void remove_from_old_gen_sets(const uint old_regions_removed,
-                                const uint archive_regions_removed,
                                 const uint humongous_regions_removed);
-  void prepend_to_freelist(FreeRegionList* list);
+  void prepend_to_freelist(G1FreeRegionList* list);
   void decrement_summary_bytes(size_t bytes);
 
   bool is_in(const void* p) const override;
 
   // Return "TRUE" iff the given object address is within the collection
   // set. Assumes that the reference points into the heap.
-  inline bool is_in_cset(const HeapRegion *hr) const;
+  inline bool is_in_cset(const G1HeapRegion* hr) const;
   inline bool is_in_cset(oop obj) const;
   inline bool is_in_cset(HeapWord* addr) const;
 
@@ -1066,15 +1065,13 @@ public:
     return reserved().contains(addr);
   }
 
-  G1HotCardCache* hot_card_cache() const { return _hot_card_cache; }
-
   G1CardTable* card_table() const {
     return _card_table;
   }
 
   // Iteration functions.
 
-  void object_iterate_parallel(ObjectClosure* cl, uint worker_id, HeapRegionClaimer* claimer);
+  void object_iterate_parallel(ObjectClosure* cl, uint worker_id, G1HeapRegionClaimer* claimer);
 
   // Iterate over all objects, calling "cl.do_object" on each.
   void object_iterate(ObjectClosure* cl) override;
@@ -1086,16 +1083,17 @@ public:
 
   // Iterate over heap regions, in address order, terminating the
   // iteration early if the "do_heap_region" method returns "true".
-  void heap_region_iterate(HeapRegionClosure* blk) const;
-  void heap_region_iterate(HeapRegionIndexClosure* blk) const;
+  void heap_region_iterate(G1HeapRegionClosure* blk) const;
+  void heap_region_iterate(G1HeapRegionIndexClosure* blk) const;
 
   // Return the region with the given index. It assumes the index is valid.
-  inline HeapRegion* region_at(uint index) const;
-  inline HeapRegion* region_at_or_null(uint index) const;
+  inline G1HeapRegion* region_at(uint index) const;
+  inline G1HeapRegion* region_at_or_null(uint index) const;
 
-  // Return the next region (by index) that is part of the same
-  // humongous object that hr is part of.
-  inline HeapRegion* next_region_in_humongous(HeapRegion* hr) const;
+  // Iterate over the regions that the humongous object starting at the given
+  // region and apply the given method with the signature f(G1HeapRegion*) on them.
+  template <typename Func>
+  void humongous_obj_regions_iterate(G1HeapRegion* start, const Func& f);
 
   // Calculate the region index of the given address. Given address must be
   // within the heap.
@@ -1104,51 +1102,51 @@ public:
   inline HeapWord* bottom_addr_for_region(uint index) const;
 
   // Two functions to iterate over the heap regions in parallel. Threads
-  // compete using the HeapRegionClaimer to claim the regions before
+  // compete using the G1HeapRegionClaimer to claim the regions before
   // applying the closure on them.
-  // The _from_worker_offset version uses the HeapRegionClaimer and
+  // The _from_worker_offset version uses the G1HeapRegionClaimer and
   // the worker id to calculate a start offset to prevent all workers to
   // start from the point.
-  void heap_region_par_iterate_from_worker_offset(HeapRegionClosure* cl,
-                                                  HeapRegionClaimer* hrclaimer,
+  void heap_region_par_iterate_from_worker_offset(G1HeapRegionClosure* cl,
+                                                  G1HeapRegionClaimer* hrclaimer,
                                                   uint worker_id) const;
 
-  void heap_region_par_iterate_from_start(HeapRegionClosure* cl,
-                                          HeapRegionClaimer* hrclaimer) const;
+  void heap_region_par_iterate_from_start(G1HeapRegionClosure* cl,
+                                          G1HeapRegionClaimer* hrclaimer) const;
 
   // Iterate over all regions in the collection set in parallel.
-  void collection_set_par_iterate_all(HeapRegionClosure* cl,
-                                      HeapRegionClaimer* hr_claimer,
+  void collection_set_par_iterate_all(G1HeapRegionClosure* cl,
+                                      G1HeapRegionClaimer* hr_claimer,
                                       uint worker_id);
 
   // Iterate over all regions currently in the current collection set.
-  void collection_set_iterate_all(HeapRegionClosure* blk);
+  void collection_set_iterate_all(G1HeapRegionClosure* blk);
 
   // Iterate over the regions in the current increment of the collection set.
   // Starts the iteration so that the start regions of a given worker id over the
   // set active_workers are evenly spread across the set of collection set regions
   // to be iterated.
-  // The variant with the HeapRegionClaimer guarantees that the closure will be
+  // The variant with the G1HeapRegionClaimer guarantees that the closure will be
   // applied to a particular region exactly once.
-  void collection_set_iterate_increment_from(HeapRegionClosure *blk, uint worker_id) {
-    collection_set_iterate_increment_from(blk, NULL, worker_id);
+  void collection_set_iterate_increment_from(G1HeapRegionClosure *blk, uint worker_id) {
+    collection_set_iterate_increment_from(blk, nullptr, worker_id);
   }
-  void collection_set_iterate_increment_from(HeapRegionClosure *blk, HeapRegionClaimer* hr_claimer, uint worker_id);
+  void collection_set_iterate_increment_from(G1HeapRegionClosure *blk, G1HeapRegionClaimer* hr_claimer, uint worker_id);
   // Iterate over the array of region indexes, uint regions[length], applying
-  // the given HeapRegionClosure on each region. The worker_id will determine where
+  // the given G1HeapRegionClosure on each region. The worker_id will determine where
   // to start the iteration to allow for more efficient parallel iteration.
-  void par_iterate_regions_array(HeapRegionClosure* cl,
-                                 HeapRegionClaimer* hr_claimer,
+  void par_iterate_regions_array(G1HeapRegionClosure* cl,
+                                 G1HeapRegionClaimer* hr_claimer,
                                  const uint regions[],
                                  size_t length,
                                  uint worker_id) const;
 
-  // Returns the HeapRegion that contains addr. addr must not be nullptr.
-  inline HeapRegion* heap_region_containing(const void* addr) const;
+  // Returns the G1HeapRegion that contains addr. addr must not be null.
+  inline G1HeapRegion* heap_region_containing(const void* addr) const;
 
-  // Returns the HeapRegion that contains addr, or nullptr if that is an uncommitted
-  // region. addr must not be nullptr.
-  inline HeapRegion* heap_region_containing_or_null(const void* addr) const;
+  // Returns the G1HeapRegion that contains addr, or null if that is an uncommitted
+  // region. addr must not be null.
+  inline G1HeapRegion* heap_region_containing_or_null(const void* addr) const;
 
   // A CollectedHeap is divided into a dense sequence of "blocks"; that is,
   // each address in the (reserved) heap is a member of exactly
@@ -1210,7 +1208,7 @@ public:
     return named_heap<G1CollectedHeap>(CollectedHeap::G1);
   }
 
-  void set_region_short_lived_locked(HeapRegion* hr);
+  void set_region_short_lived_locked(G1HeapRegion* hr);
   // add appropriate methods for any other surv rate groups
 
   G1SurvivorRegions* survivor() { return &_survivor; }
@@ -1223,7 +1221,6 @@ public:
   size_t survivor_regions_used_bytes() const { return _survivor.used_bytes(); }
   uint young_regions_count() const { return _eden.length() + _survivor.length(); }
   uint old_regions_count() const { return _old_set.length(); }
-  uint archive_regions_count() const { return _archive_set.length(); }
   uint humongous_regions_count() const { return _humongous_set.length(); }
 
 #ifdef ASSERT
@@ -1235,15 +1232,15 @@ public:
   inline static bool is_obj_filler(const oop obj);
   // Determine if an object is dead, given the object and also
   // the region to which the object belongs.
-  inline bool is_obj_dead(const oop obj, const HeapRegion* hr) const;
+  inline bool is_obj_dead(const oop obj, const G1HeapRegion* hr) const;
 
   // Determine if an object is dead, given only the object itself.
   // This will find the region to which the object belongs and
   // then call the region version of the same function.
-  // If obj is NULL it is not dead.
+  // If obj is null it is not dead.
   inline bool is_obj_dead(const oop obj) const;
 
-  inline bool is_obj_dead_full(const oop obj, const HeapRegion* hr) const;
+  inline bool is_obj_dead_full(const oop obj, const G1HeapRegion* hr) const;
   inline bool is_obj_dead_full(const oop obj) const;
 
   // Mark the live object that failed evacuation in the bitmap.
@@ -1269,10 +1266,6 @@ public:
   // Recalculate amount of used memory after GC. Must be called after all allocation
   // has finished.
   void update_used_after_gc(bool evacuation_failed);
-  // Reset and re-enable the hot card cache.
-  // Note the counts for the cards in the regions in the
-  // collection set are reset when the collection set is freed.
-  void reset_hot_card_cache();
 
   // Rebuild the code root lists for each region
   // after a full GC.
@@ -1280,6 +1273,10 @@ public:
 
   // Performs cleaning of data structures after class unloading.
   void complete_cleaning(bool class_unloading_occurred);
+
+  void unload_classes_and_code(const char* description, BoolObjectClosure* cl, GCTimer* timer);
+
+  void bulk_unregister_nmethods();
 
   // Verification
 
@@ -1294,15 +1291,13 @@ public:
 
   WorkerThreads* safepoint_workers() override { return _workers; }
 
-  bool is_archived_object(oop object) const override;
-
   // The methods below are here for convenience and dispatch the
   // appropriate method depending on value of the given VerifyOption
   // parameter. The values for that parameter, and their meanings,
   // are the same as those above.
 
   bool is_obj_dead_cond(const oop obj,
-                        const HeapRegion* hr,
+                        const G1HeapRegion* hr,
                         const VerifyOption vo) const;
 
   bool is_obj_dead_cond(const oop obj,
@@ -1311,9 +1306,6 @@ public:
   G1HeapSummary create_g1_heap_summary();
   G1EvacSummary create_g1_evac_summary(G1EvacStats* stats);
 
-  void pin_object(JavaThread* thread, oop obj) override;
-  void unpin_object(JavaThread* thread, oop obj) override;
-
   // Printing
 private:
   void print_heap_regions() const;
@@ -1321,7 +1313,7 @@ private:
 
 public:
   void print_on(outputStream* st) const override;
-  void print_extended_on(outputStream* st) const override;
+  void print_extended_on(outputStream* st) const;
   void print_on_error(outputStream* st) const override;
 
   void gc_threads_do(ThreadClosure* tc) const override;

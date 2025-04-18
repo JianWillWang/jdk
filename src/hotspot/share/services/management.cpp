@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2025, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -22,7 +22,6 @@
  *
  */
 
-#include "precompiled.hpp"
 #include "classfile/classLoader.hpp"
 #include "classfile/systemDictionary.hpp"
 #include "classfile/vmClasses.hpp"
@@ -47,6 +46,7 @@
 #include "runtime/interfaceSupport.inline.hpp"
 #include "runtime/javaCalls.hpp"
 #include "runtime/jniHandles.inline.hpp"
+#include "runtime/mutexLocker.hpp"
 #include "runtime/notificationThread.hpp"
 #include "runtime/os.hpp"
 #include "runtime/thread.inline.hpp"
@@ -61,7 +61,6 @@
 #include "services/heapDumper.hpp"
 #include "services/lowMemoryDetector.hpp"
 #include "services/gcNotifier.hpp"
-#include "services/nmtDCmd.hpp"
 #include "services/management.hpp"
 #include "services/memoryManager.hpp"
 #include "services/memoryPool.hpp"
@@ -145,17 +144,12 @@ void Management::init() {
   _optional_support.isRemoteDiagnosticCommandsSupported = 1;
 
   // Registration of the diagnostic commands
-  DCmdRegistrant::register_dcmds();
-  DCmdRegistrant::register_dcmds_ext();
-  uint32_t full_export = DCmd_Source_Internal | DCmd_Source_AttachAPI
-                         | DCmd_Source_MBean;
-  DCmdFactory::register_DCmdFactory(new DCmdFactoryImpl<NMTDCmd>(full_export, true, false));
+  DCmd::register_dcmds();
 }
 
 void Management::initialize(TRAPS) {
-  if (UseNotificationThread) {
-    NotificationThread::initialize();
-  }
+  NotificationThread::initialize();
+
   if (ManagementServer) {
     ResourceMark rm(THREAD);
     HandleMark hm(THREAD);
@@ -165,7 +159,6 @@ void Management::initialize(TRAPS) {
     Handle loader = Handle(THREAD, SystemDictionary::java_system_loader());
     Klass* k = SystemDictionary::resolve_or_null(vmSymbols::jdk_internal_agent_Agent(),
                                                    loader,
-                                                   Handle(),
                                                    THREAD);
     if (k == nullptr) {
       vm_exit_during_initialization("Management agent initialization failure: "
@@ -433,8 +426,6 @@ static MemoryPool* get_memory_pool_from_jobject(jobject obj, TRAPS) {
   return MemoryService::get_memory_pool(ph);
 }
 
-#endif // INCLUDE_MANAGEMENT
-
 static void validate_thread_id_array(typeArrayHandle ids_ah, TRAPS) {
   int num_threads = ids_ah->length();
 
@@ -450,7 +441,15 @@ static void validate_thread_id_array(typeArrayHandle ids_ah, TRAPS) {
   }
 }
 
-#if INCLUDE_MANAGEMENT
+// Returns true if the JavaThread's Java object is a platform thread
+static bool is_platform_thread(JavaThread* jt) {
+  if (jt != nullptr) {
+    oop thread_obj = jt->threadObj();
+    return (thread_obj != nullptr) && !thread_obj->is_a(vmClasses::BoundVirtualThread_klass());
+  } else {
+    return false;
+  }
+}
 
 static void validate_thread_info_array(objArrayHandle infoArray_h, TRAPS) {
   // check if the element of infoArray is of type ThreadInfo class
@@ -462,6 +461,11 @@ static void validate_thread_info_array(objArrayHandle infoArray_h, TRAPS) {
   }
 }
 
+// Returns true if the ThreadSnapshot's Java object is a platform thread
+static bool is_platform_thread(ThreadSnapshot* ts) {
+  oop thread_obj = ts->threadObj();
+  return (thread_obj != nullptr) && !thread_obj->is_a(vmClasses::BoundVirtualThread_klass());
+}
 
 static MemoryManager* get_memory_manager_from_jobject(jobject obj, TRAPS) {
   if (obj == nullptr) {
@@ -678,7 +682,7 @@ JVM_ENTRY(jlong, jmm_SetPoolThreshold(JNIEnv* env, jobject obj, jmmThresholdType
 
   if ((size_t)threshold > max_uintx) {
     stringStream st;
-    st.print("Invalid valid threshold value. Threshold value (" JLONG_FORMAT ") > max value of size_t (" UINTX_FORMAT ")", threshold, max_uintx);
+    st.print("Invalid valid threshold value. Threshold value (" JLONG_FORMAT ") > max value of size_t (%zu)", threshold, max_uintx);
     THROW_MSG_(vmSymbols::java_lang_IllegalArgumentException(), st.as_string(), -1);
   }
 
@@ -1044,7 +1048,7 @@ static void do_thread_dump(ThreadDumpResult* dump_result,
     for (int i = 0; i < num_threads; i++) {
       jlong tid = ids_ah->long_at(i);
       JavaThread* jt = tlh.list()->find_JavaThread_from_java_tid(tid);
-      oop thread_obj = (jt != nullptr ? jt->threadObj() : (oop)nullptr);
+      oop thread_obj = is_platform_thread(jt) ? jt->threadObj() : (oop)nullptr;
       instanceHandle threadObj_h(THREAD, (instanceOop) thread_obj);
       thread_handle_array->append(threadObj_h);
     }
@@ -1145,8 +1149,8 @@ JVM_ENTRY(jint, jmm_GetThreadInfo(JNIEnv *env, jlongArray ids, jint maxDepth, jo
     // For each thread, create an java/lang/management/ThreadInfo object
     // and fill with the thread information
 
-    if (ts->threadObj() == nullptr) {
-     // if the thread does not exist or now it is terminated, set threadinfo to null
+    if (!is_platform_thread(ts)) {
+      // if the thread does not exist, has terminated, or is a virtual thread, then set threadinfo to null
       infoArray_h->obj_at_put(index, nullptr);
       continue;
     }
@@ -1211,8 +1215,8 @@ JVM_ENTRY(jobjectArray, jmm_DumpThreads(JNIEnv *env, jlongArray thread_ids, jboo
 
   int index = 0;
   for (ThreadSnapshot* ts = dump_result.snapshots(); ts != nullptr; ts = ts->next(), index++) {
-    if (ts->threadObj() == nullptr) {
-     // if the thread does not exist or now it is terminated, set threadinfo to null
+    if (!is_platform_thread(ts)) {
+      // if the thread does not exist, has terminated, or is a virtual thread, then set threadinfo to null
       result_h->obj_at_put(index, nullptr);
       continue;
     }
@@ -1408,7 +1412,7 @@ JVM_ENTRY(jlong, jmm_GetThreadCpuTime(JNIEnv *env, jlong thread_id))
   } else {
     ThreadsListHandle tlh;
     java_thread = tlh.list()->find_JavaThread_from_java_tid(thread_id);
-    if (java_thread != nullptr) {
+    if (is_platform_thread(java_thread)) {
       return os::thread_cpu_time((Thread*) java_thread);
     }
   }
@@ -1426,7 +1430,7 @@ JVM_ENTRY(jobjectArray, jmm_GetVMGlobalNames(JNIEnv *env))
   int num_entries = 0;
   for (int i = 0; i < nFlags; i++) {
     JVMFlag* flag = &JVMFlag::flags[i];
-    // Exclude notproduct and develop flags in product builds.
+    // Exclude develop flags in product builds.
     if (flag->is_constant_in_binary()) {
       continue;
     }
@@ -1453,7 +1457,7 @@ JVM_END
 // Utility function used by jmm_GetVMGlobals.  Returns false if flag type
 // can't be determined, true otherwise.  If false is returned, then *global
 // will be incomplete and invalid.
-bool add_global_entry(Handle name, jmmVMGlobal *global, JVMFlag *flag, TRAPS) {
+static bool add_global_entry(Handle name, jmmVMGlobal *global, JVMFlag *flag, TRAPS) {
   Handle flag_name;
   if (name() == nullptr) {
     flag_name = java_lang_String::create_from_str(flag->name(), CHECK_false);
@@ -1583,7 +1587,7 @@ JVM_ENTRY(jint, jmm_GetVMGlobals(JNIEnv *env,
     int num_entries = 0;
     for (int i = 0; i < nFlags && num_entries < count;  i++) {
       JVMFlag* flag = &JVMFlag::flags[i];
-      // Exclude notproduct and develop flags in product builds.
+      // Exclude develop flags in product builds.
       if (flag->is_constant_in_binary()) {
         continue;
       }
@@ -1814,7 +1818,7 @@ JVM_END
 // of a given length and return the objArrayOop
 static objArrayOop get_memory_usage_objArray(jobjectArray array, int length, TRAPS) {
   if (array == nullptr) {
-    THROW_(vmSymbols::java_lang_NullPointerException(), 0);
+    THROW_NULL(vmSymbols::java_lang_NullPointerException());
   }
 
   objArrayOop oa = objArrayOop(JNIHandles::resolve_non_null(array));
@@ -1822,16 +1826,16 @@ static objArrayOop get_memory_usage_objArray(jobjectArray array, int length, TRA
 
   // array must be of the given length
   if (length != array_h->length()) {
-    THROW_MSG_(vmSymbols::java_lang_IllegalArgumentException(),
-               "The length of the given MemoryUsage array does not match the number of memory pools.", 0);
+    THROW_MSG_NULL(vmSymbols::java_lang_IllegalArgumentException(),
+                   "The length of the given MemoryUsage array does not match the number of memory pools.");
   }
 
   // check if the element of array is of type MemoryUsage class
   Klass* usage_klass = Management::java_lang_management_MemoryUsage_klass(CHECK_NULL);
   Klass* element_klass = ObjArrayKlass::cast(array_h->klass())->element_klass();
   if (element_klass != usage_klass) {
-    THROW_MSG_(vmSymbols::java_lang_IllegalArgumentException(),
-               "The element type is not MemoryUsage class", 0);
+    THROW_MSG_NULL(vmSymbols::java_lang_IllegalArgumentException(),
+                   "The element type is not MemoryUsage class");
   }
 
   return array_h();
@@ -1903,7 +1907,7 @@ JVM_ENTRY(void, jmm_GetLastGCStat(JNIEnv *env, jobject obj, jmmGCStat *gc_stat))
     if (u.max_size() == 0 && u.used() > 0) {
       // If max size == 0, this pool is a survivor space.
       // Set max size = -1 since the pools will be swapped after GC.
-      MemoryUsage usage(u.init_size(), u.used(), u.committed(), (size_t)-1);
+      MemoryUsage usage(u.init_size(), u.used(), u.committed(), MemoryUsage::undefined_size());
       after_usage = MemoryService::create_MemoryUsage_obj(usage, CHECK);
     } else {
       after_usage = MemoryService::create_MemoryUsage_obj(stat.after_gc_usage_for_pool(i), CHECK);
@@ -1997,7 +2001,9 @@ JVM_ENTRY(void, jmm_GetDiagnosticCommandInfo(JNIEnv *env, jobjectArray cmds,
         THROW_MSG(vmSymbols::java_lang_NullPointerException(),
                 "Command name cannot be null.");
     }
-    int pos = info_list->find((void*)cmd_name,DCmdInfo::by_name);
+    int pos = info_list->find_if([&](DCmdInfo* info) {
+      return info->name_equals(cmd_name);
+    });
     if (pos == -1) {
         THROW_MSG(vmSymbols::java_lang_IllegalArgumentException(),
              "Unknown diagnostic command");
@@ -2006,10 +2012,6 @@ JVM_ENTRY(void, jmm_GetDiagnosticCommandInfo(JNIEnv *env, jobjectArray cmds,
     infoArray[i].name = info->name();
     infoArray[i].description = info->description();
     infoArray[i].impact = info->impact();
-    JavaPermission p = info->permission();
-    infoArray[i].permission_class = p._class;
-    infoArray[i].permission_name = p._name;
-    infoArray[i].permission_action = p._action;
     infoArray[i].num_arguments = info->num_arguments();
     infoArray[i].enabled = info->is_enabled();
   }
@@ -2085,7 +2087,42 @@ jlong Management::ticks_to_ms(jlong ticks) {
   return (jlong)(((double)ticks / (double)os::elapsed_frequency())
                  * (double)1000.0);
 }
-#endif // INCLUDE_MANAGEMENT
+
+// Gets the amount of memory allocated on the Java heap since JVM launch.
+JVM_ENTRY(jlong, jmm_GetTotalThreadAllocatedMemory(JNIEnv *env))
+    // A thread increments exited_allocated_bytes in ThreadService::remove_thread
+    // only after it removes itself from the threads list, and once a TLH is
+    // created, no thread it references can remove itself from the threads
+    // list, so none can update exited_allocated_bytes. We therefore initialize
+    // result with exited_allocated_bytes after after we create the TLH so that
+    // the final result can only be short due to (1) threads that start after
+    // the TLH is created, or (2) terminating threads that escape TLH creation
+    // and don't update exited_allocated_bytes before we initialize result.
+
+    // We keep a high water mark to ensure monotonicity in case threads counted
+    // on a previous call end up in state (2).
+    static jlong high_water_result = 0;
+
+    JavaThreadIteratorWithHandle jtiwh;
+    jlong result = ThreadService::exited_allocated_bytes();
+    for (; JavaThread* thread = jtiwh.next();) {
+      jlong size = thread->cooked_allocated_bytes();
+      result += size;
+    }
+
+    {
+      assert(MonitoringSupport_lock != nullptr, "Must be");
+      MutexLocker ml(MonitoringSupport_lock, Mutex::_no_safepoint_check_flag);
+      if (result < high_water_result) {
+        // Encountered (2) above, or result wrapped to a negative value. In
+        // the latter case, it's pegged at the last positive value.
+        result = high_water_result;
+      } else {
+        high_water_result = result;
+      }
+    }
+    return result;
+JVM_END
 
 // Gets the amount of memory allocated on the Java heap for a single thread.
 // Returns -1 if the thread does not exist or has terminated.
@@ -2101,8 +2138,7 @@ JVM_ENTRY(jlong, jmm_GetOneThreadAllocatedMemory(JNIEnv *env, jlong thread_id))
 
   ThreadsListHandle tlh;
   JavaThread* java_thread = tlh.list()->find_JavaThread_from_java_tid(thread_id);
-
-  if (java_thread != nullptr) {
+  if (is_platform_thread(java_thread)) {
     return java_thread->cooked_allocated_bytes();
   }
   return -1;
@@ -2141,7 +2177,7 @@ JVM_ENTRY(void, jmm_GetThreadAllocatedMemory(JNIEnv *env, jlongArray ids,
   ThreadsListHandle tlh;
   for (int i = 0; i < num_threads; i++) {
     JavaThread* java_thread = tlh.list()->find_JavaThread_from_java_tid(ids_ah->long_at(i));
-    if (java_thread != nullptr) {
+    if (is_platform_thread(java_thread)) {
       sizeArray_h->long_at_put(i, java_thread->cooked_allocated_bytes());
     }
   }
@@ -2169,11 +2205,8 @@ JVM_ENTRY(jlong, jmm_GetThreadCpuTimeWithKind(JNIEnv *env, jlong thread_id, jboo
   } else {
     ThreadsListHandle tlh;
     java_thread = tlh.list()->find_JavaThread_from_java_tid(thread_id);
-    if (java_thread != nullptr) {
-      oop thread_obj = java_thread->threadObj();
-      if (thread_obj != nullptr && !thread_obj->is_a(vmClasses::BasicVirtualThread_klass())) {
-        return os::thread_cpu_time((Thread*) java_thread, user_sys_cpu_time != 0);
-      }
+    if (is_platform_thread(java_thread)) {
+      return os::thread_cpu_time((Thread*) java_thread, user_sys_cpu_time != 0);
     }
   }
   return -1;
@@ -2215,16 +2248,13 @@ JVM_ENTRY(void, jmm_GetThreadCpuTimesWithKind(JNIEnv *env, jlongArray ids,
   ThreadsListHandle tlh;
   for (int i = 0; i < num_threads; i++) {
     JavaThread* java_thread = tlh.list()->find_JavaThread_from_java_tid(ids_ah->long_at(i));
-    if (java_thread != nullptr) {
+    if (is_platform_thread(java_thread)) {
       timeArray_h->long_at_put(i, os::thread_cpu_time((Thread*)java_thread,
                                                       user_sys_cpu_time != 0));
     }
   }
 JVM_END
 
-
-
-#if INCLUDE_MANAGEMENT
 const struct jmmInterface_1_ jmm_interface = {
   nullptr,
   nullptr,
@@ -2235,6 +2265,7 @@ const struct jmmInterface_1_ jmm_interface = {
   jmm_GetMemoryManagers,
   jmm_GetMemoryPoolUsage,
   jmm_GetPeakMemoryPoolUsage,
+  jmm_GetTotalThreadAllocatedMemory,
   jmm_GetOneThreadAllocatedMemory,
   jmm_GetThreadAllocatedMemory,
   jmm_GetMemoryUsage,
